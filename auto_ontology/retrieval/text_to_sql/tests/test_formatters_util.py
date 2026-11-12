@@ -445,3 +445,71 @@ def test_legacy_rows_spell_the_same_table_in_both_sections() -> None:
 
     assert "lakehouse.lakehouse.clusters" in tables_section
     assert "Table: lakehouse.lakehouse.clusters" in hint
+
+
+def _hop(src: str, src_col: str, dst: str, dst_col: str) -> dict:
+    return {
+        "source_schema": "public",
+        "source_table": src,
+        "source_column": src_col,
+        "target_schema": "public",
+        "target_table": dst,
+        "target_column": dst_col,
+    }
+
+
+def test_semantic_context_lists_alternative_routes_strongest_last() -> None:
+    via_staff = [
+        _hop("address", "address_id", "staff", "address_id"),
+        _hop("staff", "staff_id", "rental", "staff_id"),
+    ]
+    via_customer = [
+        _hop("address", "address_id", "customer", "address_id"),
+        _hop("customer", "customer_id", "rental", "customer_id"),
+    ]
+    rendered = format_semantic_context(
+        {"schema_name": "public", "table_name": "address", "col_name": "city"},
+        [
+            {
+                "attr_name": "RentedOn",
+                "col_name": "rented_on",
+                "schema_name": "public",
+                "table_name": "rental",
+                "path": via_staff,
+                "path_options": [
+                    {"path": via_staff, "score": 0.94},
+                    {"path": via_customer, "score": 0.63},
+                ],
+            }
+        ],
+        target_db="db",
+    )
+
+    assert "Alternative join routes" in rendered
+    assert "pick the ONE whose meaning matches the question" in rendered
+    route_2 = rendered.index("Route 2 (address -> customer -> rental)")
+    route_1 = rendered.index("Route 1 (address -> staff -> rental)")
+    assert route_2 < route_1  # strongest last, nearest the question
+    assert "db.public.staff.staff_id = db.public.rental.staff_id" in rendered
+    assert "db.public.customer.customer_id = db.public.rental.customer_id" in rendered
+    assert "    Join path:" not in rendered
+
+
+def test_semantic_context_single_option_renders_as_a_plain_path() -> None:
+    path = [_hop("orders", "customer_id", "customers", "id")]
+    rendered = format_semantic_context(
+        {"schema_name": "public", "table_name": "orders", "col_name": "id"},
+        [
+            {
+                "attr_name": "Customer",
+                "col_name": "id",
+                "schema_name": "public",
+                "table_name": "customers",
+                "path": path,
+                "path_options": [{"path": path, "score": 1.0}],
+            }
+        ],
+        target_db="db",
+    )
+    assert "    Join path:" in rendered
+    assert "Alternative join routes" not in rendered

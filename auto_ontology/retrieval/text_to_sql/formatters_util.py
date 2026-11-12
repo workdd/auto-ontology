@@ -210,8 +210,11 @@ def format_semantic_context(
                 lines.append(f"  {attr_name}: {full_table}.{col_name}{datatype_tag}")
             else:
                 lines.append("  (structural bridge — connects tables kept above)")
+            options = entry.get("path_options") or []
             path = entry.get("path") or []
-            if path:
+            if len(options) > 1:
+                lines.extend(_format_route_options(options, target_db, dialect))
+            elif path:
                 lines.append("    Join path:")
                 for hop in path:
                     left = _hop_column(hop, "source", target_db, dialect)
@@ -219,6 +222,40 @@ def format_semantic_context(
                     lines.append(f"      {left} = {right}")
 
     return "\n".join(lines)
+
+
+def _format_route_options(
+    options: list[dict],
+    target_db: str | None,
+    dialect: str | None,
+) -> list[str]:
+    """Alternative routes to one destination, weakest first.
+
+    The routes reach the same table through different intermediate tables
+    and so mean different things; the model is told to pick the one whose
+    meaning matches the question. They are listed in ascending score so the
+    strongest sits last, nearest the question, which is the order PathRAG
+    (arXiv:2502.14902, section 3.4) uses to counter lost-in-the-middle.
+    Numbering keeps "Route 1" the strongest whatever the display order.
+    """
+    lines = [
+        "    Alternative join routes (they reach the same table through different "
+        "tables and mean different things; pick the ONE whose meaning matches "
+        "the question; Route 1 is the strongest structural match):"
+    ]
+    for rank, option in reversed(list(enumerate(options, 1))):
+        hops = option.get("path") or []
+        if not hops:
+            continue
+        via = [hops[0].get("source_table", "")] + [
+            hop.get("target_table", "") for hop in hops
+        ]
+        lines.append(f"    Route {rank} ({' -> '.join(via)}):")
+        for hop in hops:
+            left = _hop_column(hop, "source", target_db, dialect)
+            right = _hop_column(hop, "target", target_db, dialect)
+            lines.append(f"      {left} = {right}")
+    return lines
 
 
 def format_important_columns_for_prompt(
