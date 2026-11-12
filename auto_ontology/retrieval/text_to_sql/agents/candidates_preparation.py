@@ -35,8 +35,10 @@ from auto_ontology.dal.attributes import (
     find_anchor_hub_siblings,
     find_connected_junction_tables,
     find_join_path,
+    find_join_paths,
     find_kept_table_bridges,
 )
+from auto_ontology.dal.join_route_ranking import DEFAULT_ALPHA, DEFAULT_THETA
 from auto_ontology.dal.custom_analyses import (
     fetch_custom_analyses_with_sql,
     fetch_tables_from_custom_analyses,
@@ -145,6 +147,49 @@ _HUB_SIBLING_RANK_K = 30
 #: Concurrent join-path lookups. Held below the DAL pool (5 + 5 overflow) so a
 #: wide candidate set cannot starve the rest of the request.
 _JOIN_PATH_WORKERS = 4
+
+# Join routes offered per destination attribute. 1 (the default) is the
+# long-standing behaviour: one shortest route from find_join_path. Above 1,
+# find_join_paths ranks up to this many routes (shortest + 1 hop at most) by
+# PathRAG flow reliability, boosted for routes through tables that hold the
+# question's own attributes, and the prompt lists them as alternatives. Two
+# tables are often joinable by equally short routes with different meanings
+# (a rental's customer address vs its clerk's address); with one route the
+# pick follows table-id order. Capped at 5 to bound prompt size.
+_JOIN_PATH_TOP_K = max(1, min(5, int(os.environ.get("JOIN_PATH_TOP_K", "1"))))
+_JOIN_PATH_FLOW_ALPHA = float(
+    os.environ.get("JOIN_PATH_FLOW_ALPHA", str(DEFAULT_ALPHA))
+)
+_JOIN_PATH_FLOW_THETA = float(
+    os.environ.get("JOIN_PATH_FLOW_THETA", str(DEFAULT_THETA))
+)
+
+
+def _join_routes(
+    anchor_col_id: str,
+    dest_col_id: str,
+    boost_table_ids: set[str],
+) -> tuple[list[dict], list[dict]]:
+    """``(best_path, options)`` for one destination.
+
+    ``best_path`` has :func:`find_join_path`'s shape, so every consumer of an
+    entry's ``path`` is unchanged. ``options`` is the ranked list from
+    :func:`find_join_paths` when there is more than one route to offer, and
+    empty otherwise (including whenever ``JOIN_PATH_TOP_K`` is 1).
+    """
+    if _JOIN_PATH_TOP_K <= 1:
+        return find_join_path(anchor_col_id, dest_col_id), []
+    routes = find_join_paths(
+        anchor_col_id,
+        dest_col_id,
+        k=_JOIN_PATH_TOP_K,
+        boost_table_ids=boost_table_ids,
+        alpha=_JOIN_PATH_FLOW_ALPHA,
+        theta=_JOIN_PATH_FLOW_THETA,
+    )
+    if not routes:
+        return [], []
+    return routes[0]["path"], routes if len(routes) > 1 else []
 
 
 def _format_relevance_filter_column(c: dict) -> str:
@@ -385,28 +430,48 @@ class CandidatePreparationAgent(BaseAgent):
                     # -- so the failure shows up as missing joins in the prompt
                     # rather than as an error.
                     workers = min(len(dest_items) or 1, _JOIN_PATH_WORKERS)
+                    # Tables holding the question's retrieved attributes: a
+                    # route through one of them is more likely the one the
+                    # question means. Only read when JOIN_PATH_TOP_K > 1.
+                    question_table_ids = {
+                        ctx["table_id"]
+                        for ctx in attr_contexts.values()
+                        if ctx.get("table_id")
+                    }
                     with ThreadPoolExecutor(max_workers=workers) as pool:
                         futures = {
                             pool.submit(
-                                find_join_path, anchor_ctx["col_id"], dctx["col_id"]
+                                _join_routes,
+                                anchor_ctx["col_id"],
+                                dctx["col_id"],
+                                question_table_ids,
                             ): (did, dctx)
                             for did, dctx in dest_items
                         }
                         for future in as_completed(futures):
                             dest_id, dest_ctx = futures[future]
-                            join_path = future.result()
-                            attribute_join_paths.append(
-                                {
-                                    "id": dest_id,
-                                    "attr_name": dest_ctx["attr_name"],
-                                    "col_name": dest_ctx["col_name"],
-                                    "table_name": dest_ctx["table_name"],
-                                    "schema_name": dest_ctx["schema_name"],
-                                    "database_name": dest_ctx["database_name"],
-                                    "datatype": dest_ctx.get("datatype") or "",
-                                    "path": join_path,
-                                }
-                            )
+                            join_path, path_options = future.result()
+                            entry = {
+                                "id": dest_id,
+                                "attr_name": dest_ctx["attr_name"],
+                                "col_name": dest_ctx["col_name"],
+                                "table_name": dest_ctx["table_name"],
+                                "schema_name": dest_ctx["schema_name"],
+                                "database_name": dest_ctx["database_name"],
+                                "datatype": dest_ctx.get("datatype") or "",
+                                "path": join_path,
+                            }
+                            if path_options:
+                                entry["path_options"] = path_options
+                                # An offered route the model cannot see the
+                                # bridge tables of is one it cannot follow,
+                                # so keep every route's tables in the schema
+                                # context, the same way 5c keeps bridges.
+                                for option in path_options:
+                                    forced_table_ids.update(
+                                        option.get("table_ids") or []
+                                    )
+                            attribute_join_paths.append(entry)
                             self.logger.info(
                                 "Join path to %s (%s): %d hop(s)",
                                 dest_ctx["attr_name"],
@@ -1055,7 +1120,11 @@ class CandidatePreparationAgent(BaseAgent):
         chains: set[str] = set()
         if attribute_join_paths:
             for entry in attribute_join_paths:
-                for hop in entry.get("path") or []:
+                routes = [entry.get("path") or []] + [
+                    option.get("path") or []
+                    for option in entry.get("path_options") or []
+                ]
+                for hop in (hop for route in routes for hop in route):
                     src = hop.get("source_table")
                     tgt = hop.get("target_table")
                     if src and tgt and src != tgt:

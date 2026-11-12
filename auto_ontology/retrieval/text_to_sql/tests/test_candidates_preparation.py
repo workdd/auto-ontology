@@ -728,3 +728,160 @@ def test_removal_is_declined_when_the_table_supplies_a_needed_column(
     kept = _run_filter([_table(n) for n in ("schools", "frpm", "satscores")])
 
     assert "frpm" in [t["name"] for t in kept]
+
+
+def test_join_routes_keep_the_single_route_by_default(monkeypatch) -> None:
+    monkeypatch.setattr(candidates_preparation, "_JOIN_PATH_TOP_K", 1)
+    monkeypatch.setattr(candidates_preparation, "find_join_path", lambda a, d: ["hop"])
+
+    def never(*args, **kwargs):
+        raise AssertionError("find_join_paths must not run when JOIN_PATH_TOP_K is 1")
+
+    monkeypatch.setattr(candidates_preparation, "find_join_paths", never)
+    assert candidates_preparation._join_routes("a", "d", {"t"}) == (["hop"], [])
+
+
+def test_join_routes_rank_alternatives_when_enabled(monkeypatch) -> None:
+    seen = {}
+
+    def ranked(anchor, dest, *, k, boost_table_ids, alpha, theta):
+        seen.update(k=k, boost=boost_table_ids, alpha=alpha, theta=theta)
+        return [
+            {"path": ["best"], "table_ids": ["a", "s", "r"], "score": 0.9},
+            {"path": ["next"], "table_ids": ["a", "c", "r"], "score": 0.6},
+        ]
+
+    monkeypatch.setattr(candidates_preparation, "_JOIN_PATH_TOP_K", 3)
+    monkeypatch.setattr(candidates_preparation, "find_join_paths", ranked)
+    path, options = candidates_preparation._join_routes("a", "d", {"s"})
+    assert path == ["best"]
+    assert [o["path"] for o in options] == [["best"], ["next"]]
+    assert seen["k"] == 3 and seen["boost"] == {"s"}
+
+
+def test_join_routes_one_route_is_not_an_option_list(monkeypatch) -> None:
+    monkeypatch.setattr(candidates_preparation, "_JOIN_PATH_TOP_K", 3)
+    monkeypatch.setattr(
+        candidates_preparation,
+        "find_join_paths",
+        lambda *a, **k: [{"path": ["only"], "table_ids": ["a", "r"], "score": 1.0}],
+    )
+    assert candidates_preparation._join_routes("a", "d", set()) == (["only"], [])
+    monkeypatch.setattr(candidates_preparation, "find_join_paths", lambda *a, **k: [])
+    assert candidates_preparation._join_routes("a", "d", set()) == ([], [])
+
+
+def test_alternative_routes_reach_the_prompt_with_their_tables(monkeypatch) -> None:
+    """With JOIN_PATH_TOP_K > 1 every offered route's tables stay in scope."""
+
+    def table(name: str) -> dict:
+        return {
+            "id": name,
+            "name": name,
+            "schema_name": "public",
+            "database_name": "db",
+            "columns": [{"name": "id"}],
+        }
+
+    def ctx(attr: str, table_id: str, col: str) -> dict:
+        return {
+            "attr_name": attr,
+            "col_name": col,
+            "col_id": f"{table_id}.{col}",
+            "table_id": table_id,
+            "table_name": table_id,
+            "schema_name": "public",
+            "database_name": "db",
+        }
+
+    contexts = {
+        "attr-city": ctx("City", "address", "city"),
+        "attr-rented": ctx("RentedOn", "rental", "rented_on"),
+    }
+    hop = {"source_table": "x", "target_table": "y"}
+    routes = [
+        {"path": [hop], "table_ids": ["address", "staff", "rental"], "score": 0.9},
+        {"path": [hop], "table_ids": ["address", "customer", "rental"], "score": 0.6},
+    ]
+    boosts: list[set[str]] = []
+
+    def fake_paths(anchor, dest, *, k, boost_table_ids, alpha, theta):
+        boosts.append(set(boost_table_ids))
+        return routes
+
+    monkeypatch.setattr(candidates_preparation, "_JOIN_PATH_TOP_K", 3)
+    monkeypatch.setattr(candidates_preparation, "find_join_paths", fake_paths)
+    monkeypatch.setattr(
+        candidates_preparation,
+        "fetch_attr_column_contexts",
+        lambda ids, database_name=None: contexts,
+    )
+    monkeypatch.setattr(candidates_preparation, "fetch_term_synonyms", lambda ids: {})
+    monkeypatch.setattr(
+        CandidatePreparationAgent,
+        "_identify_anchor",
+        lambda self, state, question, attr_contexts: ("attr-city", ""),
+    )
+    monkeypatch.setattr(
+        CandidatePreparationAgent,
+        "_retrieve_additional_tables",
+        lambda self, retriever, question, entities, target_db: [],
+    )
+    monkeypatch.setattr(
+        CandidatePreparationAgent,
+        "_filter_tables_by_relevance",
+        lambda self, state, question, tables, custom_analyses=None, attribute_join_paths=None: (
+            tables,
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        candidates_preparation, "fetch_custom_analyses_with_sql", lambda ids: []
+    )
+    monkeypatch.setattr(
+        candidates_preparation, "fetch_tables_from_custom_analyses", lambda ids: []
+    )
+    monkeypatch.setattr(
+        candidates_preparation,
+        "get_relevant_tables_from_candidates",
+        lambda candidates: [table("address"), table("rental")],
+    )
+    monkeypatch.setattr(
+        candidates_preparation,
+        "fetch_tables_by_ids",
+        lambda ids: [table(i) for i in sorted(ids)],
+    )
+    monkeypatch.setattr(
+        candidates_preparation, "find_connected_junction_tables", lambda ids: ([], [])
+    )
+    monkeypatch.setattr(
+        candidates_preparation,
+        "find_kept_table_bridges",
+        lambda ids, allowed=None: ([], [], 0),
+    )
+
+    state = cast(
+        AgentState,
+        {
+            "initial_question": "rentals handled by staff living in a city",
+            "data_retriever": object(),
+            "path_state": {
+                "target_db": "db",
+                "retrieved_column_attributes": [
+                    {"id": "attr-city"},
+                    {"id": "attr-rented"},
+                ],
+            },
+        },
+    )
+
+    result = CandidatePreparationAgent().execute(state)["path_state"]
+
+    (entry,) = [
+        e for e in result["attribute_join_paths"] if e.get("id") == "attr-rented"
+    ]
+    assert entry["path"] == [hop]
+    assert entry["path_options"] == routes
+    assert boosts == [{"address", "rental"}]
+    kept = {t["name"] for t in result["relevant_tables"]}
+    assert {"staff", "customer"} <= kept
