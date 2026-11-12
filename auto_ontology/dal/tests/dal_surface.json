@@ -10,6 +10,7 @@
     "find_column_attribute_by_column_id": "(column_id: 'str') -> 'str | None'",
     "find_connected_junction_tables": "(table_ids: 'list[str]') -> 'tuple[list[dict], list[list[dict]]]'",
     "find_join_path": "(anchor_col_id: 'str', dest_col_id: 'str') -> 'list[dict]'",
+    "find_join_paths": "(anchor_col_id: 'str', dest_col_id: 'str', *, k: 'int' = 3, boost_table_ids: 'Collection[str]' = (), alpha: 'float' = 0.7, theta: 'float' = 0.005) -> 'list[dict]'",
     "find_kept_table_bridges": "(table_ids: 'list[str]', allowed_table_ids: 'set[str] | None' = None, max_bridge_tables: 'int' = 5) -> 'tuple[list[dict], list[list[dict]], int]'",
     "find_shared_hub_bridge": "(col_a_id: 'str', col_b_id: 'str') -> 'dict'",
     "find_table_bridge": "(table_a_id: 'str', table_b_id: 'str', allowed_table_ids: 'set[str] | None' = None) -> 'tuple[list[dict], list[dict]]'",
@@ -104,6 +105,12 @@
     "list_groups": "() -> 'list[dict[str, Any]]'",
     "list_users_and_groups": "() -> 'dict[str, Any]'",
     "update_group": "(*, group_id: 'str', updates: 'dict[str, Any]', user_ids: 'list[str] | None') -> 'dict[str, Any] | None'"
+  },
+  "join_route_ranking": {
+    "RankedRoute": "class(object)",
+    "enumerate_routes": "(adjacency: 'Adjacency', anchor: 'str', dest: 'str', *, max_extra_hops: 'int' = 1, max_hops: 'int' = 8) -> 'list[tuple[tuple[str, ...], tuple[tuple[str, str], ...]]]'",
+    "flow_resources": "(adjacency: 'Adjacency', source: 'str', *, alpha: 'float' = 0.7, theta: 'float' = 0.005) -> 'dict[str, float]'",
+    "rank_routes": "(adjacency: 'Adjacency', anchor: 'str', dest: 'str', *, k: 'int', boost_tables: 'Collection[str]' = (), table_names: 'Mapping[str, str] | None' = None, alpha: 'float' = 0.7, theta: 'float' = 0.005, boost: 'float' = 0.5, max_extra_hops: 'int' = 1, max_hops: 'int' = 8) -> 'list[RankedRoute]'"
   },
   "model_interchange": {
     "ModelImportValidationError": "class(ModelInterchangeError)",

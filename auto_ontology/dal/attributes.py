@@ -12,6 +12,7 @@ run BFS over tables while retaining the exact join columns on every edge.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Collection
 import itertools
 import logging
 from typing import Any
@@ -32,7 +33,12 @@ from sqlalchemy.dialects.postgresql import insert
 
 from auto_ontology.dal import schema as s
 from auto_ontology.dal.datasources import fetch_col_table_contexts
-from auto_ontology.dal.session import store, write_transaction
+from auto_ontology.dal.join_route_ranking import (
+    DEFAULT_ALPHA,
+    DEFAULT_THETA,
+    rank_routes,
+)
+from auto_ontology.dal.session import IN_QUERY_BATCH, store, write_transaction
 from auto_ontology.semantic.constants import SEMANTIC_SOURCE
 
 logger = logging.getLogger(__name__)
@@ -789,6 +795,38 @@ _SEMANTIC_TABLE_EDGES = (
 )
 
 
+def _semantic_table_adjacency(
+    database_id: str,
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Table-level join edges of one database, as ``(next_table, src_col, dst_col)``.
+
+    The FK -> owner direction is always present; owner -> FK only when the
+    owner column is the owner table's declared primary key. See
+    :func:`_find_table_join_hops` for why. Each list is sorted, which is what
+    makes the single-route BFS deterministic for a given set of ids.
+    """
+    rows = store().query_read(
+        _SEMANTIC_TABLE_EDGES,
+        {"database_id": database_id},
+    )
+    adjacency: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
+    for row in rows:
+        fk_table_id = row["fk_table_id"]
+        owner_table_id = row["owner_table_id"]
+        if fk_table_id == owner_table_id:
+            continue
+        adjacency[fk_table_id].append(
+            (owner_table_id, row["fk_column_id"], row["owner_column_id"])
+        )
+        if row["owner_is_pk"]:
+            adjacency[owner_table_id].append(
+                (fk_table_id, row["owner_column_id"], row["fk_column_id"])
+            )
+    for edges in adjacency.values():
+        edges.sort()
+    return adjacency
+
+
 def _find_table_join_hops(
     anchor_table_id: str,
     dest_table_id: str,
@@ -811,25 +849,7 @@ def _find_table_join_hops(
     can't reach (both endpoints are FK columns *into* the same identity hub,
     so there's no forward edge on either side to start from).
     """
-    rows = store().query_read(
-        _SEMANTIC_TABLE_EDGES,
-        {"database_id": database_id},
-    )
-    adjacency: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
-    for row in rows:
-        fk_table_id = row["fk_table_id"]
-        owner_table_id = row["owner_table_id"]
-        if fk_table_id == owner_table_id:
-            continue
-        adjacency[fk_table_id].append(
-            (owner_table_id, row["fk_column_id"], row["owner_column_id"])
-        )
-        if row["owner_is_pk"]:
-            adjacency[owner_table_id].append(
-                (fk_table_id, row["owner_column_id"], row["fk_column_id"])
-            )
-    for edges in adjacency.values():
-        edges.sort()
+    adjacency = _semantic_table_adjacency(database_id)
 
     max_hops = (MAX_PATH_DEPTH + 2) // 4
     parents: dict[str, tuple[str, str, str] | None] = {anchor_table_id: None}
@@ -1080,27 +1100,132 @@ def find_join_path(anchor_col_id: str, dest_col_id: str) -> list[dict]:
     if not hop_pairs:
         return []
 
-    col_ids = list(dict.fromkeys(col_id for pair in hop_pairs for col_id in pair))
+    return _hop_dicts([hop_pairs])[0]
+
+
+def _hop_dicts(routes: list[list[tuple[str, str]]]) -> list[list[dict]]:
+    """Name every hop of every route, with one lookup for all of them."""
+    col_ids = list(
+        dict.fromkeys(col_id for hops in routes for pair in hops for col_id in pair)
+    )
     names = _name_columns(col_ids)
     contexts = fetch_col_table_contexts(col_ids)
 
-    hops: list[dict] = []
-    for source_id, target_id in hop_pairs:
-        source_context = contexts.get(source_id, {})
-        target_context = contexts.get(target_id, {})
-        hops.append(
-            {
-                "source_database": source_context.get("database_name", ""),
-                "source_schema": source_context.get("schema_name", ""),
-                "source_table": source_context.get("table_name", ""),
-                "source_column": names.get(source_id, ""),
-                "target_database": target_context.get("database_name", ""),
-                "target_schema": target_context.get("schema_name", ""),
-                "target_table": target_context.get("table_name", ""),
-                "target_column": names.get(target_id, ""),
-            }
+    named: list[list[dict]] = []
+    for hop_pairs in routes:
+        hops: list[dict] = []
+        for source_id, target_id in hop_pairs:
+            source_context = contexts.get(source_id, {})
+            target_context = contexts.get(target_id, {})
+            hops.append(
+                {
+                    "source_database": source_context.get("database_name", ""),
+                    "source_schema": source_context.get("schema_name", ""),
+                    "source_table": source_context.get("table_name", ""),
+                    "source_column": names.get(source_id, ""),
+                    "target_database": target_context.get("database_name", ""),
+                    "target_schema": target_context.get("schema_name", ""),
+                    "target_table": target_context.get("table_name", ""),
+                    "target_column": names.get(target_id, ""),
+                }
+            )
+        named.append(hops)
+    return named
+
+
+def find_join_paths(
+    anchor_col_id: str,
+    dest_col_id: str,
+    *,
+    k: int = 3,
+    boost_table_ids: Collection[str] = (),
+    alpha: float = DEFAULT_ALPHA,
+    theta: float = DEFAULT_THETA,
+) -> list[dict]:
+    """Up to *k* semantic join routes between the columns' tables, best first.
+
+    The multi-route counterpart of :func:`find_join_path`, ranked as described
+    in :mod:`auto_ontology.dal.join_route_ranking`. Routes use the same edges
+    and PK discipline as the single-route BFS, and are at most one hop longer
+    than the shortest. *boost_table_ids* are tables that hold the question's
+    retrieved attributes; a route through them ranks higher.
+
+    Each entry is ``{"path": [hop, ...], "table_ids": [...], "score": float,
+    "reliability": float}``, where ``path`` has the same hop shape as
+    :func:`find_join_path`. ``[]`` in the same cases :func:`find_join_path`
+    returns ``[]``.
+    """
+    if anchor_col_id == dest_col_id or k < 1:
+        return []
+
+    endpoint_contexts = fetch_col_table_contexts([anchor_col_id, dest_col_id])
+    anchor_context = endpoint_contexts.get(anchor_col_id)
+    dest_context = endpoint_contexts.get(dest_col_id)
+    if not anchor_context or not dest_context:
+        return []
+    if anchor_context["table_id"] == dest_context["table_id"]:
+        return []
+    if anchor_context["database_id"] != dest_context["database_id"]:
+        logger.warning(
+            "find_join_paths: rejected cross-database path %s -> %s",
+            anchor_col_id,
+            dest_col_id,
         )
-    return hops
+        return []
+
+    try:
+        adjacency = _semantic_table_adjacency(anchor_context["database_id"])
+        table_ids = set(adjacency) | {
+            edge[0] for edges in adjacency.values() for edge in edges
+        }
+        ranked = rank_routes(
+            adjacency,
+            anchor_context["table_id"],
+            dest_context["table_id"],
+            k=k,
+            boost_tables=boost_table_ids,
+            table_names=_table_names(table_ids),
+            alpha=alpha,
+            theta=theta,
+            max_hops=(MAX_PATH_DEPTH + 2) // 4,
+        )
+    except Exception:
+        logger.warning(
+            "find_join_paths: query failed for %s -> %s",
+            anchor_col_id,
+            dest_col_id,
+            exc_info=True,
+        )
+        return []
+
+    if not ranked:
+        return []
+    named = _hop_dicts([list(route.hops) for route in ranked])
+    return [
+        {
+            "path": hops,
+            "table_ids": list(route.tables),
+            "score": route.score,
+            "reliability": route.reliability,
+        }
+        for route, hops in zip(ranked, named, strict=True)
+    ]
+
+
+def _table_names(table_ids: Collection[str]) -> dict[str, str]:
+    """``{table_id: name}``, for tie-breaking route order by something stable."""
+    if not table_ids:
+        return {}
+    names: dict[str, str] = {}
+    ids = list(table_ids)
+    for start in range(0, len(ids), IN_QUERY_BATCH):
+        rows = store().query_read(
+            select(s.catalog_table.c.id, s.catalog_table.c.name).where(
+                s.catalog_table.c.id.in_(ids[start : start + IN_QUERY_BATCH])
+            )
+        )
+        names.update({row["id"]: row["name"] for row in rows})
+    return names
 
 
 def find_shared_hub_bridge(col_a_id: str, col_b_id: str) -> dict:
