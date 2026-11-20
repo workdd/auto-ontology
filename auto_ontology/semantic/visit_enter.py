@@ -23,20 +23,31 @@ from auto_ontology.connectors import get_connectors
 from auto_ontology.connectors.db_errors import is_infrastructure_error
 from auto_ontology.dal.attributes import merge_column_attribute
 from auto_ontology.dal.datasources import (
+    clear_column_values,
     mark_table_as_junction,
     store_column_date_formats,
+    store_column_distinct_ratios,
+    store_column_distinct_values,
     store_column_sample_values,
     store_column_uniqueness,
 )
+from auto_ontology.dal.pii import pii_tagged_column_ids
 from auto_ontology.semantic.date_format import infer_date_format, is_date_type
 from auto_ontology.dal.terms import (
     fetch_terms_and_attributes_for_table,
     upsert_table_term,
 )
-from auto_ontology.semantic.deterministic import column_attribute_specs
+from auto_ontology.semantic.deterministic import (
+    column_attribute_specs,
+    fill_missing_column_descriptions,
+    lacks_description,
+)
 from auto_ontology.semantic.domain import DomainSummary
 from auto_ontology.semantic.embed import _MAX_EMBEDDED_JSON_SAMPLE_LEN, SemanticEmbedder
-from auto_ontology.semantic.fk_suggester import suggest_potential_foreign_keys
+from auto_ontology.semantic.fk_suggester import (
+    declared_pk_column_names,
+    suggest_potential_foreign_keys,
+)
 from auto_ontology.semantic.models import ColumnAttributeSpec, ProcessTableResult
 from auto_ontology.semantic.term_extractor import (
     apply_display_names_to_specs,
@@ -60,6 +71,12 @@ _PROFILING_QUERY_TIMEOUT_SECONDS = 120
 _MAX_CONSECUTIVE_SAMPLE_FAILURES = 3
 # Most-common values kept per column.
 _PROFILING_TOP_N = 5
+# Lowest distinct values kept per suspected FK/PK column (`distinct_values`).
+KEY_DISTINCT_VALUES_LIMIT = 20
+# Share of sampled non-null values that must be distinct for a column to count
+# as unique. Below 1 so a stray duplicate or a dirty row does not hide a key;
+# under 20 values it still means every value distinct.
+_UNIQUE_RATIO = 0.95
 # String sample values longer than this are not persisted.
 _MAX_SAMPLE_VALUE_LEN = 30
 # Declared data-type substrings whose sample values are not persisted.
@@ -104,7 +121,7 @@ _DATE_SHAPE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 # Tables are processed in parallel (ThreadPoolExecutor in pipeline.py), but the
 # commit phase is serialized so collision-qualified Term names are allocated in
 # a stable order and each table's store writes and embedding stay together.
-_term_commit_lock = threading.Lock()
+term_commit_lock = threading.Lock()
 
 
 @contextmanager
@@ -126,7 +143,7 @@ def _step(table_name: str, description: str) -> Iterator[None]:
         )
 
 
-def _terms_with_assignments(
+def terms_with_assignments(
     term_result: Any,
     spec_by_column: dict[str, ColumnAttributeSpec],
 ) -> list[tuple[Any, list[Any]]]:
@@ -151,7 +168,7 @@ def _resolve_connector(database_name: str | None) -> "SQLDatabase | None":
     return None
 
 
-def _execute_capped(connector: "SQLDatabase", sql: str) -> pd.DataFrame:
+def execute_capped(connector: "SQLDatabase", sql: str) -> pd.DataFrame:
     """Run a profiling query, capped on connectors that advertise a free cap.
 
     ``is True`` rather than a plain truthiness check: a test double answers
@@ -376,7 +393,7 @@ def _distinct_values_if_low_cardinality(
     """
     quoted = quoted_identifier(col_name, getattr(connector, "dialect", None))
     try:
-        df = _execute_capped(
+        df = execute_capped(
             connector,
             f"SELECT DISTINCT {quoted} FROM {qualified} "
             f"WHERE {quoted} IS NOT NULL LIMIT {cap + 1}",
@@ -403,17 +420,91 @@ def _distinct_values_if_low_cardinality(
     return values
 
 
+def probe_ascending_distinct_values(
+    connector: "SQLDatabase",
+    schema_name: str | None,
+    table_name: str,
+    column_name: str,
+) -> list[Any] | None:
+    """The column's lowest :data:`KEY_DISTINCT_VALUES_LIMIT` distinct values.
+
+    In the warehouse's own ascending order, which is what makes two columns'
+    lists comparable although each is cut short (``semantic.fk_values``).
+    ``None`` when the probe fails or the sampling breaker is open; a timeout
+    or lost connection counts against the breaker like any other profiling
+    query.
+    """
+    if _sampling_breaker.is_open(connector):
+        return None
+    quoted = quoted_identifier(column_name, getattr(connector, "dialect", None))
+    qualified = connector.qualify(schema_name, table_name)
+    try:
+        df = execute_capped(
+            connector,
+            f"SELECT DISTINCT {quoted} FROM {qualified} WHERE {quoted} IS NOT NULL "
+            f"ORDER BY {quoted} LIMIT {KEY_DISTINCT_VALUES_LIMIT}",
+        )
+    except Exception as exc:
+        _sampling_breaker.record_failure(connector, exc)
+        logger.warning(
+            "Ascending distinct-value probe on %s.%s failed (%s)",
+            qualified,
+            column_name,
+            type(exc).__name__,
+        )
+        return None
+    _sampling_breaker.record_success(connector)
+    if df is None:
+        return None
+    return [_json_ready_sample(v) for v in df.iloc[:, 0].tolist()]
+
+
+def pii_column_names(columns: Sequence[dict[str, Any]]) -> set[str]:
+    """Names of the catalog *columns* tagged ``PII``, which are never sampled."""
+    ids = {str(col["id"]): col.get("name") for col in columns if col.get("id")}
+    return {
+        name
+        for column_id in pii_tagged_column_ids(list(ids))
+        if (name := ids.get(column_id))
+    }
+
+
+def _store_key_distinct_values(
+    table: dict[str, Any],
+    connector: "SQLDatabase",
+    column_names: set[str],
+) -> None:
+    """Probe and persist the ascending distinct values of suspected key columns."""
+    values: dict[str, list[Any]] = {}
+    for column_name in sorted(column_names):
+        if _sampling_breaker.is_open(connector):
+            break
+        probed = probe_ascending_distinct_values(
+            connector, table.get("schema_name"), table["name"], column_name
+        )
+        if probed:
+            values[column_name] = probed
+    store_column_distinct_values(table["id"], values)
+
+
 def calculate_columns_profiling(
     table: dict[str, Any],
     columns: list[dict[str, Any]],
     connector: "SQLDatabase",
     *,
     probe_distinct_values: bool = True,
+    pii_columns: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Profile a table's columns from a live sample of up to 1000 rows.
 
+    Columns tagged ``PII`` (``pii_columns``, looked up from the catalog when
+    None) are left out of the ``SELECT`` itself, so their values never leave
+    the warehouse. They get no profile at all -- no samples, ``is_unique``,
+    ratio, or format.
+
     Runs ``SELECT * ... LIMIT 1000`` and, for every column, computes an
-    ``is_unique`` flag (all non-null values distinct) and the 5 most-common
+    ``is_unique`` flag (at least 95% of non-null values distinct, the measured
+    share persisted as ``distinct_ratio``) and the 5 most-common
     values. For non-unique text columns whose sample yields fewer than 5
     distinct values, runs a ``SELECT DISTINCT`` probe to capture rare enum
     values that the row prefix may have missed.
@@ -432,6 +523,7 @@ def calculate_columns_profiling(
     text coerce through ``stringify_sample_values``.
 
     Persists to catalog columns: ``is_unique`` for every column,
+    ``distinct_ratio`` for every column with a non-null sampled value,
     ``format`` for date/time-typed or text columns whose sampled values share
     one storage notation — resolved by validating every value against
     strptime candidates (see ``auto_ontology.semantic.date_format``), so it can settle
@@ -458,9 +550,29 @@ def calculate_columns_profiling(
     # two-level name would resolve against the wrong catalog.
     qualified = connector.qualify(schema_name, table_name)
 
+    if pii_columns is None:
+        pii_columns = pii_column_names(columns)
+    if pii_columns:
+        dialect = getattr(connector, "dialect", None)
+        selected = [
+            quoted_identifier(name, dialect)
+            for col in columns
+            if (name := col.get("name")) and name not in pii_columns
+        ]
+        if not selected:
+            logger.info(
+                "[%s] every column is tagged PII — skipping value sampling",
+                table_name,
+            )
+            return {}
+        select_list = ", ".join(selected)
+    else:
+        select_list = "*"
+
     try:
-        df = _execute_capped(
-            connector, f"SELECT * FROM {qualified} LIMIT {_PROFILING_SAMPLE_LIMIT}"
+        df = execute_capped(
+            connector,
+            f"SELECT {select_list} FROM {qualified} LIMIT {_PROFILING_SAMPLE_LIMIT}",
         )
     except Exception as exc:
         _sampling_breaker.record_failure(connector, exc)
@@ -480,6 +592,7 @@ def calculate_columns_profiling(
     profiling: dict[str, dict[str, Any]] = {}
     sample_values: dict[str, list] = {}
     uniqueness: dict[str, bool] = {}
+    distinct_ratios: dict[str, float] = {}
     date_formats: dict[str, str] = {}
 
     for column in df.columns:
@@ -492,7 +605,8 @@ def calculate_columns_profiling(
             # as dict/list, neither of which can go in a set or a Counter.
             keys = [_sample_key(value) for value in values]
 
-            is_unique = bool(keys and len(set(keys)) == len(keys))
+            distinct_ratio = len(set(keys)) / len(keys) if keys else None
+            is_unique = distinct_ratio is not None and distinct_ratio >= _UNIQUE_RATIO
 
             first_by_key: dict[str, Any] = {}
             for key, value in zip(keys, values):
@@ -555,6 +669,8 @@ def calculate_columns_profiling(
             date_formats[col_name] = date_format
 
         uniqueness[col_name] = is_unique
+        if distinct_ratio is not None:
+            distinct_ratios[col_name] = distinct_ratio
         profiling[col_name] = {
             "sample_values": col_values,
             "is_unique": is_unique,
@@ -745,6 +861,7 @@ def calculate_columns_profiling(
     table_id = table["id"]
     store_column_sample_values(table_id, sample_values)
     store_column_uniqueness(table_id, uniqueness)
+    store_column_distinct_ratios(table_id, distinct_ratios)
     store_column_date_formats(table_id, date_formats)
 
     return profiling
@@ -758,6 +875,7 @@ def process_table(
     embedder: SemanticEmbedder | None = None,
     database_name: str | None = None,
     probe_distinct_values: bool = True,
+    probe_key_values: bool = True,
     commit_slot: AbstractContextManager[None] | None = None,
 ) -> ProcessTableResult:
     """Build taxonomy nodes for one table: Term and ColumnAttributes.
@@ -766,6 +884,10 @@ def process_table(
     read once per run by the caller. It gates only the per-column ``SELECT
     DISTINCT`` probes; the bounded row sample always runs. Defaults to True so
     a direct caller keeps the historical behaviour.
+
+    ``probe_key_values`` is the inverse of ``PREVENT_SEMANTIC_FK_DB_QUERIES``:
+    whether the suspected FK and PK columns get their ascending distinct values
+    probed for semantic FK resolution.
 
     ``commit_slot`` lets the parallel pipeline impose canonical table ordering
     only on persistence. Direct callers fall back to the process-local lock.
@@ -780,7 +902,31 @@ def process_table(
     # values for FK detection below.
     connector = _resolve_connector(database_name)
     columns_profiling_samples: dict[str, dict[str, Any]] = {}
-    if connector is not None and _sampling_breaker.is_open(connector):
+    # PII columns are never sampled and their catalog values never reach a
+    # prompt. When the tags cannot be read, nothing is sampled and every
+    # persisted profile is cleared: guessing that no column is PII would move
+    # exactly the values this guards.
+    pii_columns: set[str] | None
+    try:
+        pii_columns = pii_column_names(ctx.get("columns", []))
+    except Exception:
+        logger.debug("PII tag lookup failed", exc_info=True)
+        pii_columns = None
+    for col in ctx.get("columns", []):
+        if pii_columns is None or col.get("name") in pii_columns:
+            col["sample_values"] = None
+    if pii_columns is None:
+        clear_column_values(
+            table_id,
+            sorted(n for col in ctx.get("columns", []) if (n := col.get("name"))),
+        )
+    elif pii_columns:
+        clear_column_values(table_id, sorted(pii_columns))
+    if pii_columns is None:
+        logger.warning(
+            "[%s] Skipping value sampling — could not read PII tags", table_name
+        )
+    elif connector is not None and _sampling_breaker.is_open(connector):
         # Already established that this warehouse is not answering samples.
         # Re-asking costs the timeout per table and returns nothing.
         logger.info(
@@ -796,6 +942,7 @@ def process_table(
                     ctx.get("columns", []),
                     connector,
                     probe_distinct_values=probe_distinct_values,
+                    pii_columns=pii_columns,
                 )
         except Exception:
             logger.warning(
@@ -822,6 +969,23 @@ def process_table(
     }
     all_fk_names = declared_fk_names | suggested_fk_names
 
+    column_names = {col.get("name") for col in ctx.get("columns", [])}
+    key_names = (
+        all_fk_names
+        | declared_pk_column_names(table)
+        | set(fk_suggestions.pk_column_names)
+    ) & column_names
+    key_names -= pii_columns or set()
+    if (
+        probe_key_values
+        and pii_columns is not None
+        and key_names
+        and connector is not None
+        and not _sampling_breaker.is_open(connector)
+    ):
+        with _step(table_name, f"Probing key values ({len(key_names)} columns)"):
+            _store_key_distinct_values(table, connector, key_names)
+
     # Payload-bearing junctions are wider than the pure two-key shape handled
     # by the later bridge pass. Require both the conservative LLM decision and
     # structural evidence for at least two FK roles before persisting it.
@@ -837,23 +1001,32 @@ def process_table(
             fk_suggestions.junction_table_rationale or "LLM table-grain decision",
         )
 
+    non_fk_columns = [
+        col for col in ctx.get("columns", []) if col.get("name") not in all_fk_names
+    ]
+    undocumented = sum(1 for col in non_fk_columns if lacks_description(col))
+    if undocumented:
+        with _step(table_name, f"Describing {undocumented} undocumented column(s)"):
+            fill_missing_column_descriptions(
+                table_id, non_fk_columns, columns_profiling_samples
+            )
+
     # --- Build attribute specs for non-FK columns ---
     specs = column_attribute_specs(
         ctx.get("columns", []),
         declared_fks,
         suggested_fk_columns=all_fk_names,
-        columns_profiling_samples=columns_profiling_samples,
     )
     if not specs:
         logger.warning("[%s] no non-FK columns — skipping Term creation", table_name)
         return ProcessTableResult()
 
     # --- LLM: propose Term(s) and display names ---
-    with _step(table_name, f"Generating terms and descriptions ({len(specs)} columns)"):
+    with _step(table_name, f"Generating terms ({len(specs)} columns)"):
         term_result = extract_term(table, ctx, specs, domain_summary=domain_summary)
     apply_display_names_to_specs(term_result, specs)
     spec_by_column = {spec.source_column: spec for spec in specs}
-    persisted_terms = _terms_with_assignments(term_result, spec_by_column)
+    persisted_terms = terms_with_assignments(term_result, spec_by_column)
 
     if not persisted_terms:
         logger.warning(
@@ -869,10 +1042,10 @@ def process_table(
     terms: list = []
     attrs_by_term: dict[str, list[dict]] = defaultdict(list)
 
-    commit_context = commit_slot if commit_slot is not None else _term_commit_lock
+    commit_context = commit_slot if commit_slot is not None else term_commit_lock
     with commit_context:
         with _step(table_name, f"Writing {len(persisted_terms)} term(s) to the graph"):
-            _commit_terms(
+            commit_terms(
                 persisted_terms,
                 spec_by_column,
                 table_id,
@@ -897,7 +1070,13 @@ def process_table(
         except Exception:
             logger.warning("[%s] failed to fetch persisted terms", table_name)
 
-        if embedder is not None and terms:
+        # The embedding reads sample_values from the catalog; without the PII
+        # tags it is not built at all.
+        if pii_columns is None and embedder is not None and terms:
+            logger.warning(
+                "[%s] Skipping inline embed — could not read PII tags", table_name
+            )
+        elif embedder is not None and terms:
             try:
                 with _step(table_name, f"Embedding {len(terms)} term(s)"):
                     for term in terms:
@@ -911,7 +1090,7 @@ def process_table(
     )
 
 
-def _commit_terms(
+def commit_terms(
     persisted_terms: list,
     spec_by_column: dict[str, ColumnAttributeSpec],
     table_id: str,
@@ -946,6 +1125,5 @@ def _commit_terms(
                 source_column=spec.source_column,
                 attr_name=spec.display_name,
                 datatype=spec.datatype,
-                description=spec.description,
             )
             result_attr_names.append(spec.display_name)

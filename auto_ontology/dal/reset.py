@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from sqlalchemy import delete, select, union
 
 from auto_ontology.dal import schema as s
+from auto_ontology.dal.concepts import delete_orphan_concepts
 from auto_ontology.dal.session import store, write_transaction
 from auto_ontology.vdb import get_data_vdb, get_semantic_vdb
 
@@ -69,7 +70,10 @@ def _delete_scoped_semantic(database_name: str) -> int:
     "Belonging" is resolved per entity, because each reaches a database by a
     different path:
 
+    * a **TermFamily** through its schema;
     * a **Term** through the tables that represent it;
+    * a **Concept** through its Terms: it goes once none is left;
+    * a **semantic FK** through its column, whatever Concept it targets;
     * a **ColumnAttribute** through its ``table_id``;
     * a **SqlAttribute** and a **CustomAnalysis** through the tables their SQL
       references.
@@ -85,6 +89,25 @@ def _delete_scoped_semantic(database_name: str) -> int:
     """
     tables = _table_ids(database_name)
     deleted = 0
+
+    # TermFamily: scoped by schema. Deleting its Terms only cascades the links,
+    # which would leave the families standing empty.
+    deleted += len(
+        store().query_write(
+            delete(s.term_family)
+            .where(
+                s.term_family.c.schema_id.in_(
+                    select(s.catalog_schema.c.id)
+                    .join(
+                        s.catalog_database,
+                        s.catalog_database.c.id == s.catalog_schema.c.database_id,
+                    )
+                    .where(s.catalog_database.c.name == database_name)
+                )
+            )
+            .returning(s.term_family.c.id)
+        )
+    )
 
     def only_ours(link_table, owner_column, table_column):
         """Rows whose links all land inside this database, and at least one does."""
@@ -109,6 +132,34 @@ def _delete_scoped_semantic(database_name: str) -> int:
     deleted += len(
         store().query_write(
             delete(s.term).where(s.term.c.id.in_(term_ids)).returning(s.term.c.id)
+        )
+    )
+
+    # Semantic FK: owned by its column, so it goes even when it targets a
+    # Concept that survives.
+    deleted += len(
+        store().query_write(
+            delete(s.column__semantic_fk)
+            .where(
+                s.column__semantic_fk.c.column_id.in_(
+                    select(s.catalog_column.c.id).where(
+                        s.catalog_column.c.table_id.in_(tables)
+                    )
+                )
+            )
+            .returning(s.column__semantic_fk.c.column_id)
+        )
+    )
+
+    # Concept: deleted once no Term belongs to it. A Concept whose shared Term
+    # survives keeps its keys and the FKs into them, which other databases'
+    # tables may hold.
+    deleted += delete_orphan_concepts(
+        row["id"]
+        for row in store().query_read(
+            select(s.catalog_database.c.id).where(
+                s.catalog_database.c.name == database_name
+            )
         )
     )
 
@@ -172,6 +223,8 @@ def _delete_all_semantic() -> int:
     """
     deleted = 0
     for table in (
+        s.term_family,
+        s.concept,
         s.term,
         s.column_attribute,
         s.sql_attribute,

@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ParsedTable } from '@/lib/parseSqlResponse';
 import type { ChartCell, ChartSpec } from './types';
 
 /** Leading characters a spreadsheet may execute as a formula. */
-const FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+const FORMULA_TRIGGER = /^[=+\-@\t\r\n]/;
 
 /**
  * Serialize a cell to a CSV field: neutralize spreadsheet formula injection on
@@ -20,15 +21,53 @@ function escapeField(value: ChartCell): string {
 	return text;
 }
 
-/** Slugify a chart title into a safe `.csv` filename. */
-function toFilename(title: string): string {
+/** A variation selector only modifies the character before it, which is dropped with the rest. */
+const VARIATION_SELECTOR = /[\uFE0E\uFE0F]/gu;
+
+/** Everything a filename cannot hold, minus the letters, digits, marks and joins kept below. */
+const NOT_IN_FILENAME = /[^\p{L}\p{N}\p{M}\s_\-\u200C\u200D]/gu;
+
+/** A slug made only of combining marks or join controls draws nothing in a file list. */
+const VISIBLE_CHARACTER = /[\p{L}\p{N}]/u;
+
+/**
+ * Slugify a chart title into a safe `.csv` filename. Letters, digits and the
+ * combining marks that belong to them are kept in every script -- `\p{L}` and
+ * `\p{N}` rather than `\w`, which is ASCII-only and reduced a Korean or Japanese
+ * title to `chart` -- while everything that cannot appear in a filename is
+ * dropped. `\p{M}` matters as much as the letters: Devanagari vowel signs and
+ * viramas are marks, so without it `हिन्दी` collapses to `हनद`. The zero-width
+ * join controls matter for the same reason: Persian `می‌رود` only reads as one word
+ * because of its U+200C, and dropping it changes the written form. A variation
+ * selector is the opposite case -- its base character is not a letter, so it goes
+ * with it -- and a title left with no letter or digit falls back to `fallback`
+ * rather than exporting a file whose name is invisible.
+ */
+function toFilename(title: string, fallback = 'chart'): string {
 	const slug = title
 		.toLowerCase()
 		.trim()
-		.replace(/[^\w\s-]/g, '')
+		.replace(VARIATION_SELECTOR, '')
+		.replace(NOT_IN_FILENAME, '')
 		.replace(/[\s_]+/g, '-')
-		.replace(/^-+|-+$/g, '');
-	return `${slug || 'chart'}.csv`;
+		.replace(/^[\s\u200C\u200D-]+|[\s\u200C\u200D-]+$/gu, '');
+	return `${VISIBLE_CHARACTER.test(slug) ? slug : fallback}.csv`;
+}
+
+/**
+ * Serialize rows to an RFC 4180 CSV: one header line, then each row's values
+ * read in `columns` order. `headers` and `columns` must be the same length.
+ */
+export function rowsToCsv(
+	headers: string[],
+	columns: string[],
+	rows: ReadonlyArray<Record<string, ChartCell>>,
+): string {
+	const lines = [headers.map(escapeField).join(',')];
+	for (const row of rows) {
+		lines.push(columns.map((key) => escapeField(row[key] ?? null)).join(','));
+	}
+	return lines.join('\r\n');
 }
 
 /**
@@ -39,13 +78,35 @@ function toFilename(title: string): string {
 export function specToCsv(spec: ChartSpec): { filename: string; csv: string } {
 	const columns = [spec.x.key, ...spec.series.map((s) => s.key)];
 	const headers = [spec.x.label ?? spec.x.key, ...spec.series.map((s) => s.label ?? s.key)];
+	return { filename: toFilename(spec.title), csv: rowsToCsv(headers, columns, spec.data) };
+}
 
-	const lines = [headers.map(escapeField).join(',')];
-	for (const row of spec.data) {
-		lines.push(columns.map((key) => escapeField(row[key] ?? null)).join(','));
-	}
+/**
+ * A cell becomes a number only when the conversion round-trips exactly, so a
+ * zero-padded code like `007` or an ID beyond float precision stays text.
+ */
+function toCell(text: string): ChartCell {
+	const value = Number(text);
+	return text !== '' && String(value) === text ? value : text;
+}
 
-	return { filename: toFilename(spec.title), csv: lines.join('\r\n') };
+/**
+ * Serialize a parsed query result to an RFC 4180 CSV. Every cell of a
+ * {@link ParsedTable} is a string, so numeric cells are converted back to
+ * numbers first; otherwise the formula guard would prefix every negative.
+ */
+export function tableToCsv(table: ParsedTable, title: string): { filename: string; csv: string } {
+	const rows = table.rows.map((row) => {
+		const out: Record<string, ChartCell> = Object.create(null);
+		for (const col of table.columns) {
+			out[col] = toCell(row[col] ?? '');
+		}
+		return out;
+	});
+	return {
+		filename: toFilename(title, 'query-results'),
+		csv: rowsToCsv(table.columns, table.columns, rows),
+	};
 }
 
 /**
@@ -54,7 +115,16 @@ export function specToCsv(spec: ChartSpec): { filename: string; csv: string } {
  */
 export function downloadCsv(spec: ChartSpec): void {
 	const { filename, csv } = specToCsv(spec);
-	const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+	downloadCsvText(filename, csv);
+}
+
+/** Trigger a browser download of an already-serialized CSV. */
+export function downloadCsvText(filename: string, csv: string): void {
+	// Excel opens a BOM-less UTF-8 CSV in the legacy code page, which garbles
+	// every non-ASCII header and value. The byte-order mark is a property of the
+	// downloaded file, not of the RFC 4180 serialization, so it belongs here and
+	// not in `specToCsv`.
+	const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
 	const url = URL.createObjectURL(blob);
 	const anchor = document.createElement('a');
 	anchor.href = url;

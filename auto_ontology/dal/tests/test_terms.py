@@ -32,6 +32,7 @@ pytest.importorskip("sqlalchemy")
 from sqlalchemy import select  # noqa: E402
 
 from auto_ontology.dal import schema as s  # noqa: E402
+from auto_ontology.dal.tests.fk_links import link_semantic_fk  # noqa: E402
 from auto_ontology.dal import terms as t  # noqa: E402
 from auto_ontology.dal.session import store  # noqa: E402
 from auto_ontology.semantic.constants import SEMANTIC_SOURCE  # noqa: E402
@@ -445,6 +446,28 @@ def test_upsert_table_term_is_idempotent_for_one_table(world) -> None:
     assert row["description"] == "rebuilt"
 
 
+def test_upsert_table_term_never_stores_an_empty_name(world: World) -> None:
+    """An empty proposal falls back to the physical table name instead of
+    being stored as "" (never embedded) or the next as " (db.schema.table)".
+
+    The table name carries the world prefix, so the fixture teardown removes
+    the fallback Term and every run exercises the bare-name case."""
+    table = f"{world.prefix}_orders"
+    world.table(table)
+
+    persisted = [
+        t.upsert_table_term(proposed, table, world.tables[table])
+        for proposed in ("", "   ")
+    ]
+
+    assert persisted[0] == (persisted[0][0], table)
+    assert persisted[1] == persisted[0]
+    stored = store().query_read(
+        select(s.term.c.name).where(s.term.c.id == persisted[0][0])
+    )
+    assert stored[0]["name"] == table
+
+
 def test_upsert_table_term_qualifies_only_a_cross_table_name_collision(world) -> None:
     world.table("orders")
     world.table("invoices")
@@ -637,11 +660,7 @@ def test_attributes_carry_their_columns_and_zones(world) -> None:
     world.table("invoices", columns=("order_id",))
     term = world.term("Order", represents=("orders",))
     attr = world.column_attribute("order-id", "Order", table="orders", column="id")
-    _link(
-        s.column__semantic_fk,
-        column_id=world.columns["invoices.order_id"],
-        attribute_id=attr,
-    )
+    link_semantic_fk(world.columns["invoices.order_id"], attr)
     zone_id = world.zone("Sales", table="orders")
 
     row = t.fetch_column_attributes_by_term_id(term)[0]
@@ -683,11 +702,7 @@ def related(world):
     attr = world.column_attribute(
         "customer-id", "Customer", table="customers", column="id"
     )
-    _link(
-        s.column__semantic_fk,
-        column_id=world.columns["orders.customer_id"],
-        attribute_id=attr,
-    )
+    link_semantic_fk(world.columns["orders.customer_id"], attr)
     return world
 
 

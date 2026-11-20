@@ -24,10 +24,11 @@ import pytest
 
 pytest.importorskip("sqlalchemy")
 
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import select, update  # noqa: E402
 
 from auto_ontology.dal import datasources as d  # noqa: E402
 from auto_ontology.dal import schema as s  # noqa: E402
+from auto_ontology.dal.tests.fk_links import link_semantic_fk  # noqa: E402
 from auto_ontology.dal.session import store  # noqa: E402
 from auto_ontology.semantic.constants import (  # noqa: E402
     SQL_ATTR_SOURCE_BRIDGE,
@@ -178,10 +179,11 @@ def test_tables_for_schema_counts_columns_and_terms(world) -> None:
     # A second, distinct Term via the SEMANTIC_FK route.
     fk_attribute = world.attribute("customer-ref")
     _link(
-        s.column__semantic_fk,
-        column_id=world.columns["customers.customer_id"],
+        s.column__has_attribute,
+        column_id=world.columns["tags.tag_id"],
         attribute_id=fk_attribute,
     )
+    link_semantic_fk(world.columns["customers.customer_id"], fk_attribute)
     _link(s.column_attribute__term, attribute_id=fk_attribute, term_id=other)
 
     rows = _by_name(d.fetch_tables_for_schema(world.schema))
@@ -406,15 +408,11 @@ def test_tables_by_ids_nests_column_summaries(world) -> None:
     )
     customer_ref = world.attribute("customer-ref")
     _link(
-        s.column__semantic_fk,
-        column_id=world.columns["orders.customer_id"],
-        attribute_id=customer_ref,
-    )
-    _link(
         s.column__has_attribute,
         column_id=world.columns["customers.customer_id"],
         attribute_id=customer_ref,
     )
+    link_semantic_fk(world.columns["orders.customer_id"], customer_ref)
     rows = {
         r["name"]: r
         for r in d.fetch_tables_by_ids(
@@ -490,6 +488,80 @@ def test_table_context_fks_are_outgoing_only(world) -> None:
 
 def test_table_context_of_a_missing_table_is_empty_not_an_error() -> None:
     assert d.fetch_table_context("no-such-table") == {"columns": [], "fks": []}
+
+
+def test_table_context_keeps_the_columns_own_description_apart(world) -> None:
+    world.table("notes")
+    world.column("notes", "body")
+    attr = world.attribute("body", description="Borrowed")
+    _link(
+        s.column__has_attribute,
+        column_id=world.columns["notes.body"],
+        attribute_id=attr,
+    )
+
+    (column,) = d.fetch_table_context(world.tables["notes"])["columns"]
+
+    assert column["description"] == "Borrowed"
+    assert column["own_description"] is None
+
+
+# --------------------------------------------------------------------------
+# store_column_descriptions
+# --------------------------------------------------------------------------
+
+
+def test_column_descriptions_fill_only_missing_or_name_only_ones(world) -> None:
+    world.table("ledger")
+    world.column("ledger", "blank", 1)
+    world.column("ledger", "echo", 2, description="ECHO")
+    world.column("ledger", "real", 3, description="Curated")
+
+    written = d.store_column_descriptions(
+        world.tables["ledger"],
+        {"blank": "Filled", "echo": "Replaced", "real": "Overwritten"},
+    )
+
+    assert sorted(written) == sorted(
+        [world.columns["ledger.blank"], world.columns["ledger.echo"]]
+    )
+    rows = store().query_read(
+        select(s.catalog_column.c.name, s.catalog_column.c.description).where(
+            s.catalog_column.c.table_id == world.tables["ledger"]
+        )
+    )
+    assert {r["name"]: r["description"] for r in rows} == {
+        "blank": "Filled",
+        "echo": "Replaced",
+        "real": "Curated",
+    }
+
+
+def test_column_descriptions_never_replace_a_certified_one(world: World) -> None:
+    world.table("ledger")
+    world.column("ledger", "blank", 1)
+    world.column("ledger", "echo", 2, description="ECHO")
+    store().query_write(
+        update(s.catalog_column)
+        .where(s.catalog_column.c.table_id == world.tables["ledger"])
+        .values(description_certified=True)
+    )
+
+    written = d.store_column_descriptions(
+        world.tables["ledger"], {"blank": "Filled", "echo": "Replaced"}
+    )
+
+    assert written == []
+    rows = store().query_read(
+        select(
+            s.catalog_column.c.name,
+            s.catalog_column.c.description,
+            s.catalog_column.c.description_certified,
+        ).where(s.catalog_column.c.table_id == world.tables["ledger"])
+    )
+    assert {
+        r["name"]: (r["description"], r["description_certified"]) for r in rows
+    } == {"blank": (None, True), "echo": ("ECHO", True)}
 
 
 # --------------------------------------------------------------------------
@@ -667,11 +739,7 @@ def test_a_semantic_fk_counts_as_a_foreign_key(world) -> None:
         column_id=world.columns["tags.tag_id"],
         attribute_id=attribute,
     )
-    _link(
-        s.column__semantic_fk,
-        column_id=world.columns["order_note.tag_ref"],
-        attribute_id=attribute,
-    )
+    link_semantic_fk(world.columns["order_note.tag_ref"], attribute)
 
     rows = {r["table_name"]: r for r in d.fetch_bridge_table_candidates(world.prefix)}
     assert "order_note" in rows

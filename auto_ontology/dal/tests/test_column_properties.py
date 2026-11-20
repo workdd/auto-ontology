@@ -82,6 +82,7 @@ def _row(column_id: str) -> dict:
         select(
             s.catalog_column.c.sample_values,
             s.catalog_column.c.is_unique,
+            s.catalog_column.c.distinct_ratio,
             s.catalog_column.c.format,
         ).where(s.catalog_column.c.id == column_id)
     )[0]
@@ -135,6 +136,89 @@ def test_store_column_uniqueness_coerces_truthy_values(world) -> None:
     d.store_column_uniqueness(world.tables["orders"], {"id": 1})
 
     assert _row(world.columns["orders.id"])["is_unique"] is True
+
+
+def test_store_column_distinct_ratios_writes_the_measured_share(world) -> None:
+    world.table("orders")
+    world.column("orders", "id")
+    world.column("orders", "email", position=2)
+
+    d.store_column_distinct_ratios(world.tables["orders"], {"id": 1, "email": 0.97})
+
+    assert _row(world.columns["orders.id"])["distinct_ratio"] == 1.0
+    assert _row(world.columns["orders.email"])["distinct_ratio"] == 0.97
+
+
+def test_store_column_distinct_values_keeps_them_apart_from_samples(world) -> None:
+    world.table("orders")
+    world.column("orders", "id")
+    orders = world.tables["orders"]
+    d.store_column_sample_values(orders, {"id": [7, 3]})
+
+    d.store_column_distinct_values(orders, {"id": [1, 2, 3]})
+
+    row = store().query_read(
+        select(
+            s.catalog_column.c.sample_values, s.catalog_column.c.distinct_values
+        ).where(s.catalog_column.c.id == world.columns["orders.id"])
+    )[0]
+    assert json.loads(row["distinct_values"]) == [1, 2, 3]
+    assert json.loads(row["sample_values"]) == [7, 3]
+
+
+def test_clear_column_values_nulls_only_the_named_columns(world) -> None:
+    world.table("users")
+    world.column("users", "email")
+    world.column("users", "status", position=2)
+    users = world.tables["users"]
+    d.store_column_sample_values(users, {"email": ["a@b.c"], "status": ["open"]})
+    d.store_column_distinct_values(users, {"email": ["a@b.c"], "status": ["open"]})
+    d.store_column_uniqueness(users, {"email": True, "status": True})
+    d.store_column_distinct_ratios(users, {"email": 1.0, "status": 1.0})
+    d.store_column_date_formats(users, {"email": "YYYY-MM-DD", "status": "YYYY"})
+
+    d.clear_column_values(users, ["email"])
+
+    rows = {
+        row["name"]: row
+        for row in store().query_read(
+            select(
+                s.catalog_column.c.name,
+                s.catalog_column.c.sample_values,
+                s.catalog_column.c.distinct_values,
+                s.catalog_column.c.is_unique,
+                s.catalog_column.c.distinct_ratio,
+                s.catalog_column.c.format,
+            ).where(s.catalog_column.c.table_id == users)
+        )
+    }
+    assert rows["email"]["sample_values"] is None
+    assert rows["email"]["distinct_values"] is None
+    assert rows["email"]["is_unique"] is None
+    assert rows["email"]["distinct_ratio"] is None
+    assert rows["email"]["format"] is None
+    assert json.loads(rows["status"]["sample_values"]) == ["open"]
+    assert json.loads(rows["status"]["distinct_values"]) == ["open"]
+    assert rows["status"]["is_unique"] is True
+    assert rows["status"]["distinct_ratio"] == 1.0
+    assert rows["status"]["format"] == "YYYY"
+
+
+def test_key_columns_count_only_fully_distinct_unique_columns(world) -> None:
+    """A mostly-distinct column is unique for the semantic layer, but cannot
+    prove a GROUP BY vacuous or a join 1:1 for the text-to-SQL validators."""
+    world.table("orders")
+    for position, name in enumerate(("id", "email", "legacy_code", "status"), 1):
+        world.column("orders", name, position=position)
+    orders = world.tables["orders"]
+    d.store_column_uniqueness(
+        orders, {"id": True, "email": True, "legacy_code": True, "status": False}
+    )
+    d.store_column_distinct_ratios(orders, {"id": 1.0, "email": 0.97, "status": 0.2})
+
+    keys = d.find_table_key_columns("orders", world.prefix)
+
+    assert sorted(keys["unique"]) == ["id", "legacy_code"]
 
 
 # --------------------------------------------------------------------------

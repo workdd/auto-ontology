@@ -43,9 +43,14 @@ from sqlalchemy.dialects.postgresql import insert
 from auto_ontology.catalog.constants import Edges, Labels
 from auto_ontology.dal import schema as s
 from auto_ontology.dal.attributes import fetch_column_attribute_columns_map
+from auto_ontology.dal.concepts import (
+    ensure_term_concept,
+    semantic_fk_attribute_links,
+)
 from auto_ontology.dal.datasources import fetch_col_table_contexts
 from auto_ontology.dal.session import store, write_transaction
 from auto_ontology.dal.tags import TARGET_COLUMN_ATTRIBUTE, TARGET_TERM, fetch_tags_map
+from auto_ontology.dal.term_families import attribute_family_prefix
 from auto_ontology.dal.users import resolve_accessible_catalog_ids
 from auto_ontology.dal.zones import fetch_table_zones_map, zone_covers_table
 from auto_ontology.semantic.constants import (
@@ -425,6 +430,9 @@ def upsert_table_term(
     The proposed name is kept unless another table already owns it. Collisions
     are qualified with the table's full catalog identity, keeping the global
     ``(name, source)`` constraint and name-based attribute lookups unambiguous.
+    The Term's one-member Concept is created here as well
+    (:func:`~auto_ontology.dal.concepts.ensure_term_concept`), so every
+    committed Term has one.
     Returns ``(term_id, persisted_name)``, or ``None`` for a missing table.
     """
     with write_transaction():
@@ -449,6 +457,10 @@ def upsert_table_term(
             return None
 
         table = tables[0]
+        # An empty proposal would be stored as "" (never embedded, so never
+        # retrieved), and the next one as " (db.schema.table)". Use the
+        # physical table name instead.
+        name = name.strip() or table["table_name"]
         qualified_table = ".".join(
             part
             for part in (
@@ -487,6 +499,7 @@ def upsert_table_term(
                     .where(s.term.c.id == term_id)
                     .values(description=description, synonyms=synonyms or [])
                 )
+                ensure_term_concept(term_id)
                 return term_id, candidate_name
             if existing:
                 continue
@@ -511,6 +524,7 @@ def upsert_table_term(
             store().query_write(
                 insert(s.table__term).values(table_id=table_id, term_id=term_id)
             )
+            ensure_term_concept(term_id)
             return term_id, candidate_name
 
     raise RuntimeError(f"Could not allocate a private Term name for table {table_id}")
@@ -659,6 +673,8 @@ def fetch_all_terms_and_attributes(
             s.column_attribute.c.term_name,
             s.column_attribute.c.source_column,
             s.catalog_column.c.name.label("column_name"),
+            s.catalog_column.c.description.label("column_description"),
+            attribute_family_prefix(s.column_attribute.c.id).label("family_prefix"),
             s.catalog_column.c.sample_values,
             s.catalog_column.c.is_unique,
             s.catalog_table.c.id.label("table_id"),
@@ -996,6 +1012,8 @@ def _embedding_attrs_for_table(table_id: str):
             s.column_attribute.c.description,
             s.column_attribute.c.term_name,
             s.column_attribute.c.source_column,
+            s.catalog_column.c.description.label("column_description"),
+            attribute_family_prefix(s.column_attribute.c.id).label("family_prefix"),
             s.catalog_column.c.sample_values,
             s.catalog_column.c.is_unique,
             s.catalog_table.c.id.label("table_id"),
@@ -1095,6 +1113,8 @@ def fetch_term_and_column_attributes_for_embedding(
             s.column_attribute.c.description,
             s.column_attribute.c.term_name,
             s.column_attribute.c.source_column,
+            s.catalog_column.c.description.label("column_description"),
+            attribute_family_prefix(s.column_attribute.c.id).label("family_prefix"),
             s.catalog_column.c.sample_values,
             s.catalog_column.c.is_unique,
             s.catalog_table.c.id.label("table_id"),
@@ -1131,9 +1151,9 @@ def fetch_term_and_column_attributes_for_embedding(
 def fetch_column_attribute_embedding_contexts_by_column_id(
     column_id: str,
 ) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
-    """The Term contexts a column's sample-value update invalidates.
+    """The Term contexts a column's description or sample-value update invalidates.
 
-    Sample values are part of a ColumnAttribute's embedding text, so profiling a
+    Both are part of a ColumnAttribute's embedding text, so editing either on a
     column stales every attribute on it and every term behind those.
     """
     rows = store().query_read(
@@ -1147,10 +1167,13 @@ def fetch_column_attribute_embedding_contexts_by_column_id(
             s.column_attribute.c.description,
             s.column_attribute.c.term_name,
             s.column_attribute.c.source_column,
+            s.catalog_column.c.description.label("column_description"),
+            attribute_family_prefix(s.column_attribute.c.id).label("family_prefix"),
             s.catalog_column.c.sample_values,
             s.catalog_column.c.is_unique,
             s.catalog_table.c.id.label("table_id"),
             s.catalog_table.c.name.label("table_name"),
+            s.catalog_schema.c.name.label("schema_name"),
             s.column_attribute.c.id,
         )
         .select_from(
@@ -1204,7 +1227,13 @@ def fetch_column_attribute_embedding_contexts_by_column_id(
                 "description": row["description"],
                 "term_name": row["term_name"],
                 "source_column": row["source_column"],
+                "column_description": row["column_description"],
+                "family_prefix": row["family_prefix"],
                 "sample_values": row["sample_values"],
+                "is_unique": row["is_unique"],
+                "table_id": row["table_id"],
+                "table_name": row["table_name"],
+                "schema_name": row["schema_name"],
                 "id": row["id"],
             }
         )
@@ -1372,6 +1401,33 @@ def find_column_attribute_by_column_id(column_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def fetch_semantic_coverage(
+    column_ids: list[str], table_ids: list[str]
+) -> tuple[set[str], set[str]]:
+    """``(column ids with a ColumnAttribute, table ids a semantic Term represents)``."""
+    columns: set[str] = set()
+    tables: set[str] = set()
+    if column_ids:
+        rows = store().query_read(
+            select(s.column__has_attribute.c.column_id)
+            .where(s.column__has_attribute.c.column_id.in_(column_ids))
+            .distinct()
+        )
+        columns = {str(r["column_id"]) for r in rows}
+    if table_ids:
+        rows = store().query_read(
+            select(s.table__term.c.table_id)
+            .join(s.term, s.term.c.id == s.table__term.c.term_id)
+            .where(
+                s.table__term.c.table_id.in_(table_ids),
+                s.term.c.source == SEMANTIC_SOURCE,
+            )
+            .distinct()
+        )
+        tables = {str(r["table_id"]) for r in rows}
+    return columns, tables
+
+
 def fetch_term_table_pairs(
     zone_ids: list[str] | None = None,
     data_ids_by_zone: dict[str, set[str]] | None = None,
@@ -1460,6 +1516,7 @@ def fetch_term_table_pairs(
     # The link's own type is carried along so ``path`` can name it below -- the
     # two legs are otherwise identical, and unioning them first would lose which
     # one matched.
+    referencing = semantic_fk_attribute_links("term_pair_fk_attribute")
     link = (
         select(
             s.column__has_attribute.c.column_id,
@@ -1468,8 +1525,8 @@ def fetch_term_table_pairs(
         )
         .union(
             select(
-                s.column__semantic_fk.c.column_id,
-                s.column__semantic_fk.c.attribute_id,
+                referencing.c.column_id,
+                referencing.c.attribute_id,
                 literal(REL_SEMANTIC_FK).label("rel_type"),
             )
         )
@@ -1651,8 +1708,8 @@ _LINK_PATH_LABELS = {
 def _term_link_edges():
     """Every edge a term↔term path may walk, **undirected**, tagged with its type.
 
-    Unlike :data:`~auto_ontology.dal.schema.JOIN_PATH_EDGE_VIEW_SQL`, SEMANTIC_FK is
-    emitted in *both* directions here. A term↔term edge already means the two
+    SEMANTIC_FK is emitted in *both* directions here, each FK linking its
+    column to the attributes of its Concept key's member columns. A term↔term edge already means the two
     terms genuinely share a table under :func:`fetch_term_table_pairs`'s rules,
     so tracing some real path between them cannot fabricate a link the way
     ``find_join_path``'s column-to-column search could -- it can only surface a
@@ -1678,7 +1735,7 @@ def _term_link_edges():
         s.table__term,
         s.catalog_column,
         s.column_attribute__term,
-        s.column__semantic_fk,
+        semantic_fk_attribute_links("term_link_fk_attribute"),
         s.column__has_attribute,
     )
     return (

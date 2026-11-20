@@ -28,7 +28,7 @@ def _stubbed(monkeypatch: MonkeyPatch) -> None:
         name="status",
         display_name="Status",
         datatype="string",
-        description="Order status",
+        column_description="Order status",
     )
     term = SimpleNamespace(
         name="Order", description="An order", synonyms=[], attributes=[]
@@ -42,7 +42,10 @@ def _stubbed(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(
         visit_enter,
         "suggest_potential_foreign_keys",
-        lambda *_a, **_k: SimpleNamespace(suggestions=[]),
+        lambda *_a, **_k: SimpleNamespace(suggestions=[], pk_column_names=[]),
+    )
+    monkeypatch.setattr(
+        visit_enter, "fill_missing_column_descriptions", lambda *_a, **_k: []
     )
     monkeypatch.setattr(visit_enter, "column_attribute_specs", lambda *_a, **_k: [spec])
     monkeypatch.setattr(
@@ -50,7 +53,7 @@ def _stubbed(monkeypatch: MonkeyPatch) -> None:
     )
     monkeypatch.setattr(visit_enter, "apply_display_names_to_specs", lambda *_a: None)
     monkeypatch.setattr(
-        visit_enter, "_terms_with_assignments", lambda *_a: [(term, [assignment])]
+        visit_enter, "terms_with_assignments", lambda *_a: [(term, [assignment])]
     )
     monkeypatch.setattr(
         visit_enter,
@@ -58,6 +61,7 @@ def _stubbed(monkeypatch: MonkeyPatch) -> None:
         lambda *_a, **_k: ("term1", "Order"),
     )
     monkeypatch.setattr(visit_enter, "merge_column_attribute", lambda **_k: None)
+    monkeypatch.setattr(visit_enter, "clear_column_values", lambda *_a: None)
     monkeypatch.setattr(
         visit_enter,
         "fetch_terms_and_attributes_for_table",
@@ -82,7 +86,8 @@ def test_each_step_is_logged(_stubbed: None, caplog: LogCaptureFixture) -> None:
     for expected in (
         "[orders] Sampling column values (2 columns)…",
         "[orders] Detecting foreign keys…",
-        "[orders] Generating terms and descriptions (1 columns)…",
+        "[orders] Describing 2 undocumented column(s)…",
+        "[orders] Generating terms (1 columns)…",
         "[orders] Writing 1 term(s) to the graph…",
         "[orders] Embedding 1 term(s)…",
     ):
@@ -106,11 +111,35 @@ def test_steps_are_logged_in_pipeline_order(
     order = [
         "Sampling column values (2 columns)",
         "Detecting foreign keys",
-        "Generating terms and descriptions (1 columns)",
+        "Describing 2 undocumented column(s)",
+        "Generating terms (1 columns)",
         "Writing 1 term(s) to the graph",
         "Embedding 1 term(s)",
     ]
     assert [s.split("] ", 1)[1].rstrip("…") for s in starts] == order
+
+
+def test_unreadable_pii_tags_skip_the_inline_embed(
+    _stubbed: None, monkeypatch: MonkeyPatch, caplog: LogCaptureFixture
+) -> None:
+    """The embed reads catalog sample_values, so unknown PII tags skip it."""
+
+    def _unreadable(_ids: list[str]) -> set[str]:
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(visit_enter, "pii_tagged_column_ids", _unreadable)
+    embedded: list[Any] = []
+    embedder = SimpleNamespace(embed_term=lambda *a: embedded.append(a))
+    ctx = {"columns": [{"id": "c1", "name": "status"}], "fks": []}
+
+    with caplog.at_level(logging.INFO, logger="auto_ontology.semantic.visit_enter"):
+        visit_enter.process_table(
+            TABLE, ctx, domain_summary=None, embedder=embedder, database_name="mydb"
+        )
+
+    assert embedded == []
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[orders] Skipping inline embed — could not read PII tags" in messages
 
 
 def test_sampling_skip_is_logged_without_connector(

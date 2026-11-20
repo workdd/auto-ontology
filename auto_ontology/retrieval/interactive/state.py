@@ -20,6 +20,9 @@ class InteractiveSessionState:
     original_question: str
     working_question: str
     max_clarify_turns: int = 5
+    # JSON object "db|table|column" -> meaning. When set, the clarify prompt
+    # lists tables and columns from it instead of from db_schema.
+    column_meanings: str = ""
     clarify_history: list[dict] = field(default_factory=list)  # [{"q": ..., "a": ...}]
     phase: InteractivePhase = InteractivePhase.ROUND1_CLARIFY
     prior_round_sql: Optional[str] = None
@@ -122,6 +125,10 @@ class InteractiveSessionState:
     # retry compares it with its own pre-stabilization values and flips the
     # numeric type only when they still match.
     first_submit_values_digest: Optional[str] = None
+    # The SQL `step` last returned to the grader. Numeric-type alignment and
+    # order stabilization rewrite it after generation, so it can differ from
+    # ``path_state["sql_code"]``.
+    last_submitted_sql: str = ""
     scalar_hint: bool = (
         False  # True when output type is detected as scalar (one-way: False→True only)
     )

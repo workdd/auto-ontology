@@ -134,13 +134,14 @@ underlying databases.
 | `get_term_columns` | The physical columns a term maps to. |
 | `get_term_sql_attributes` | The SQL attributes defined under a term. |
 | `get_sql_attribute` | One SQL attribute: its expression and purpose. |
-| `describe_table` | A table's columns, related terms, and SQL attributes together. |
+| `describe_table` | The glossary terms a table carries, and stored queries that reference it. |
+| `explore_term_graph` | Everything within one to three hops of a term, with the relationship types. Needs the optional AGE projection (`docs/age-graph.md`). |
 
 There is deliberately no tool for browsing databases, schemas, or raw columns.
 Consumers are meant to reach the data through the semantic layer, and a catalog
 browser invites an agent to reason about raw tables instead. `describe_table`
-covers the legitimate case, since what it returns is the terms and SQL attributes
-a table participates in.
+covers the legitimate case, since what it returns is the terms a table carries
+and the stored queries that reference it.
 
 The server also advertises **instructions** at handshake describing how the tools
 sequence, which spares the model from inferring it — left to itself it tends to

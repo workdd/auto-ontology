@@ -104,13 +104,17 @@ class SeedSelectionResult(BaseModel):
 
 
 class ColumnAttributeSpec(BaseModel):
-    """Column candidate for Term assignment; display_name set by extract_term."""
+    """Column candidate for Term assignment; display_name set by extract_term.
+
+    ``column_description`` is the column's own description, shown to the Term
+    prompt; it is never written onto the attribute.
+    """
 
     source_column: str
     name: str
     display_name: str = ""
     datatype: str = ""
-    description: str | None = None
+    column_description: str | None = None
 
 
 class ColumnDescription(BaseModel):
@@ -163,6 +167,10 @@ class PotentialFkResult(BaseModel):
         default_factory=list,
         description="Suspected FK columns; empty when none apply.",
     )
+    pk_column_names: list[str] = Field(
+        default_factory=list,
+        description="Columns inferred to be the table's own primary key.",
+    )
     is_junction_table: bool = Field(
         default=False,
         description="Whether each row represents an association between entity roles.",
@@ -214,6 +222,26 @@ class FkHitSelection(BaseModel):
             "references, exactly as shown in the candidate list. "
             "Return null if none of the candidates are a confident match."
         ),
+    )
+    rationale: str = Field(default="")
+
+
+class ConceptMergeDecision(BaseModel):
+    """LLM output: whether two tables are parts of one real-world entity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    same_entity: bool = Field(
+        ...,
+        description=(
+            "True only when both tables describe the same entity, one row per "
+            "entity in each, split across two tables. False when they are two "
+            "entities that merely share an id, such as an order and its shipment."
+        ),
+    )
+    name: str | None = Field(
+        default=None,
+        description="A short singular business name for the entity, when same_entity.",
     )
     rationale: str = Field(default="")
 
