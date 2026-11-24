@@ -1482,3 +1482,82 @@ __all__ = [
     "fetch_table_zones_map",
     "fetch_term_exploration_details",
 ]
+
+
+def fetch_semantic_fk_evidence(
+    zone_ids: list[str] | None = None,
+    database_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Every visible SEMANTIC_FK edge, with the evidence it was stored with.
+
+    One row per edge: the FK column with its table, schema and database, the
+    key column it references (the attribute's ``source_column`` on the
+    attribute's table) and that attribute's term, then ``method``,
+    ``containment``, ``vector_distance`` and ``rationale`` — all ``None`` for
+    an edge stored without evidence. Both ends have to be visible, as for
+    every other cross-table edge here.
+    """
+    resolved = resolve_accessible_catalog_ids(zone_ids)
+    table_filter = None if resolved is None else list(resolved["table_ids"])
+    if table_filter is not None and not table_filter:
+        return []
+
+    fk = s.column__semantic_fk
+    attr = s.column_attribute
+    target_table = s.catalog_table.alias("evidence_target_table")
+    target_schema = s.catalog_schema.alias("evidence_target_schema")
+    target_column = s.catalog_column.alias("evidence_target_column")
+    statement = (
+        select(
+            s.catalog_column.c.id.label("column_id"),
+            s.catalog_column.c.name.label("column_name"),
+            s.catalog_table.c.id.label("table_id"),
+            s.catalog_table.c.name.label("table_name"),
+            s.catalog_schema.c.name.label("schema_name"),
+            s.catalog_database.c.id.label("database_id"),
+            s.catalog_database.c.name.label("database_name"),
+            attr.c.id.label("attribute_id"),
+            attr.c.name.label("attribute_name"),
+            attr.c.term_name,
+            target_table.c.id.label("target_table_id"),
+            target_table.c.name.label("target_table_name"),
+            target_schema.c.name.label("target_schema_name"),
+            target_column.c.id.label("target_column_id"),
+            attr.c.source_column.label("target_column_name"),
+            fk.c.use_in_join_paths,
+            fk.c.method,
+            fk.c.containment,
+            fk.c.vector_distance,
+            fk.c.rationale,
+        )
+        .select_from(
+            _column_catalog_join()
+            .join(fk, fk.c.column_id == s.catalog_column.c.id)
+            .join(attr, attr.c.id == fk.c.attribute_id)
+            .join(target_table, target_table.c.id == attr.c.table_id)
+            .join(target_schema, target_schema.c.id == target_table.c.schema_id)
+            .outerjoin(
+                target_column,
+                and_(
+                    target_column.c.table_id == target_table.c.id,
+                    target_column.c.name == attr.c.source_column,
+                ),
+            )
+        )
+        .where(
+            _visible_table(table_filter),
+            literal(True)
+            if table_filter is None
+            else target_table.c.id.in_(table_filter),
+            literal(True)
+            if database_id is None
+            else s.catalog_database.c.id == database_id,
+        )
+        .order_by(
+            s.catalog_database.c.name,
+            s.catalog_table.c.name,
+            s.catalog_column.c.name,
+            attr.c.id,
+        )
+    )
+    return [dict(row) for row in store().query_read(statement)]

@@ -22,6 +22,7 @@ const navItems: NavItem[] = [
 	{ icon: IconName.Terms, href: '/terms', label: 'Terms' },
 	{ icon: IconName.ChartBar, href: '/analysis', label: 'Analysis' },
 	{ icon: IconName.Exploration, href: '/exploration', label: 'Exploration' },
+	{ icon: IconName.Link, href: '/relationships', label: 'Relationships' },
 	{ icon: IconName.Database, href: '/data', label: 'Data' },
 	{ icon: IconName.ChartLine, href: '/analytics', label: 'Analytics', adminOnly: true },
 	// Settings is admin-only and now also contains Users and Single Sign-On

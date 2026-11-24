@@ -2791,6 +2791,28 @@
         "title": "ListResponse[PublicConnection]",
         "type": "object"
       },
+      "ListResponse_SemanticFkEvidenceRow_": {
+        "additionalProperties": true,
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticFkEvidenceRow"
+            },
+            "title": "Data",
+            "type": "array"
+          }
+        },
+        "required": [
+          "data",
+          "count"
+        ],
+        "title": "ListResponse[SemanticFkEvidenceRow]",
+        "type": "object"
+      },
       "ListResponse_SqlAttribute_": {
         "additionalProperties": true,
         "properties": {
@@ -3652,6 +3674,176 @@
           }
         },
         "title": "SemanticExplorationGraph",
+        "type": "object"
+      },
+      "SemanticFkEvidenceRow": {
+        "additionalProperties": true,
+        "description": "One SEMANTIC_FK edge and how compilation resolved it.\n\nThe FK column with its table, schema and database; the key column it\nreferences and that attribute's term; then the evidence the edge was\nstored with. `method`, `containment`, `vector_distance` and `rationale`\nare null for an edge stored without evidence.",
+        "properties": {
+          "attribute_id": {
+            "title": "Attribute Id",
+            "type": "string"
+          },
+          "attribute_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attribute Name"
+          },
+          "column_id": {
+            "title": "Column Id",
+            "type": "string"
+          },
+          "column_name": {
+            "title": "Column Name",
+            "type": "string"
+          },
+          "containment": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Containment"
+          },
+          "database_id": {
+            "title": "Database Id",
+            "type": "string"
+          },
+          "database_name": {
+            "title": "Database Name",
+            "type": "string"
+          },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
+          "schema_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Name"
+          },
+          "table_id": {
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          },
+          "target_column_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Column Id"
+          },
+          "target_column_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Column Name"
+          },
+          "target_schema_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Schema Name"
+          },
+          "target_table_id": {
+            "title": "Target Table Id",
+            "type": "string"
+          },
+          "target_table_name": {
+            "title": "Target Table Name",
+            "type": "string"
+          },
+          "term_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Term Name"
+          },
+          "use_in_join_paths": {
+            "default": true,
+            "title": "Use In Join Paths",
+            "type": "boolean"
+          },
+          "vector_distance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vector Distance"
+          }
+        },
+        "required": [
+          "column_id",
+          "column_name",
+          "table_id",
+          "table_name",
+          "database_id",
+          "database_name",
+          "attribute_id",
+          "target_table_id",
+          "target_table_name"
+        ],
+        "title": "SemanticFkEvidenceRow",
         "type": "object"
       },
       "SemanticGraphNode": {
@@ -7386,6 +7578,58 @@
           }
         },
         "summary": "Get Exploration Node Relationships",
+        "tags": [
+          "exploration"
+        ]
+      }
+    },
+    "/api/exploration/semantic-fks": {
+      "get": {
+        "description": "Every semantic foreign key with how compilation resolved it.\n\nEach row names the FK column, the key column it references and that\ncolumn's term, then the stored evidence: the resolution method, the share\nof FK values found in the key, the vector-search distance, and the\nmodel's rationale.",
+        "operationId": "list_semantic_fk_evidence_api_exploration_semantic_fks_get",
+        "parameters": [
+          {
+            "description": "When set, only edges from this database.",
+            "in": "query",
+            "name": "database_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "When set, only edges from this database.",
+              "title": "Database Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListResponse_SemanticFkEvidenceRow_"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Semantic Fk Evidence",
         "tags": [
           "exploration"
         ]

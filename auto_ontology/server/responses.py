@@ -38,6 +38,7 @@ from auto_ontology.server.models import (
     IdRef,
     PqlAnalysis,
     PublicConnection,
+    SemanticFkEvidenceRow,
     Rule,
     SchemaSummary,
     SemanticExplorationGraph,
@@ -86,6 +87,7 @@ __all__ = [
     "DescriptionSuggestionResponse",
     "EntityCoverageResponse",
     "ExplorationEdgeListResponse",
+    "SemanticFkEvidenceListResponse",
     "ExplorationRelatedNodesResponse",
     "GlobalSearchCountResponse",
     "GroupListResponse",
@@ -347,6 +349,7 @@ SemanticExplorationGraphResponse = DataResponse[SemanticExplorationGraph]
 TableExplorationDetailsResponse = DataResponse[TableExplorationDetails]
 TermExplorationDetailsResponse = DataResponse[TermExplorationDetails]
 ColumnExplorationDetailsResponse = DataResponse[ColumnExplorationDetails]
+SemanticFkEvidenceListResponse = ListResponse[SemanticFkEvidenceRow]
 ColumnAttributeExplorationDetailsResponse = DataResponse[
     ColumnAttributeExplorationDetails
 ]

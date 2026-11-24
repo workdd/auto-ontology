@@ -659,3 +659,74 @@ def test_column_details_leave_evidence_empty_for_a_plain_attribute(world) -> Non
     store().query_write(
         s.column_attribute.delete().where(s.column_attribute.c.id == attribute)
     )
+
+
+def test_semantic_fk_evidence_lists_each_edge_with_both_ends(world) -> None:
+    world.table("customers", columns=("id",))
+    world.table("orders", columns=("id", "customer_ref", "note"))
+    key = _attribute_on(world, "customers")
+    _link(
+        s.column__semantic_fk,
+        column_id=world.columns["orders.customer_ref"],
+        attribute_id=key,
+        method="llm_pick",
+        vector_distance=0.31,
+        rationale="named after the customer key",
+    )
+    plain = _attribute_on(world, "orders", "note")
+    _link(
+        s.column__has_attribute,
+        column_id=world.columns["orders.note"],
+        attribute_id=plain,
+    )
+
+    rows = [
+        r
+        for r in e.fetch_semantic_fk_evidence(database_id=world.database)
+        if r["table_id"] == world.tables["orders"]
+    ]
+
+    assert [
+        (
+            r["column_name"],
+            r["target_table_name"],
+            r["target_column_id"],
+            r["method"],
+            r["containment"],
+            r["vector_distance"],
+            r["rationale"],
+        )
+        for r in rows
+    ] == [
+        (
+            "customer_ref",
+            f"{world.prefix}_customers",
+            world.columns["customers.id"],
+            "llm_pick",
+            None,
+            0.31,
+            "named after the customer key",
+        )
+    ]
+    for attribute in (key, plain):
+        store().query_write(
+            s.column_attribute.delete().where(s.column_attribute.c.id == attribute)
+        )
+
+
+def test_semantic_fk_evidence_hides_an_edge_into_another_zone(world) -> None:
+    world.table("customers", columns=("id",))
+    world.table("orders", columns=("id", "customer_ref"))
+    key = _attribute_on(world, "customers")
+    _link(
+        s.column__semantic_fk,
+        column_id=world.columns["orders.customer_ref"],
+        attribute_id=key,
+        method="declared",
+    )
+    zone = world.zone("orders-only", "orders")
+
+    assert e.fetch_semantic_fk_evidence(zone_ids=[zone]) == []
+    store().query_write(
+        s.column_attribute.delete().where(s.column_attribute.c.id == key)
+    )

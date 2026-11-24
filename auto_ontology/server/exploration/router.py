@@ -20,6 +20,7 @@ from auto_ontology.server.responses import (
     ExplorationLinkPathResponse,
     ExplorationRelatedNodesResponse,
     SemanticExplorationGraphResponse,
+    SemanticFkEvidenceListResponse,
     SqlAttributeExplorationDetailsResponse,
     SqlExplorationDetailsResponse,
     TableExplorationDetailsResponse,
@@ -67,6 +68,23 @@ _SEMANTIC_GRAPH_LIMIT_QUERY = Query(
 def list_data_exploration_edges() -> dict:
     """Table connections backed by a shared SQL query or a foreign key."""
     rows = service.fetch_data_exploration_edges(zone_ids=None)
+    return {"data": rows, "count": len(rows)}
+
+
+@router.get("/exploration/semantic-fks", response_model=SemanticFkEvidenceListResponse)
+def list_semantic_fk_evidence(
+    database_id: str | None = Query(
+        default=None, description="When set, only edges from this database."
+    ),
+) -> dict:
+    """Every semantic foreign key with how compilation resolved it.
+
+    Each row names the FK column, the key column it references and that
+    column's term, then the stored evidence: the resolution method, the share
+    of FK values found in the key, the vector-search distance, and the
+    model's rationale.
+    """
+    rows = service.fetch_semantic_fk_evidence(zone_ids=None, database_id=database_id)
     return {"data": rows, "count": len(rows)}
 
 

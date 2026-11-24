@@ -888,6 +888,37 @@ class ColumnExplorationAttribute(ApiModel):
     rationale: str | None = None
 
 
+class SemanticFkEvidenceRow(ApiModel):
+    """One SEMANTIC_FK edge and how compilation resolved it.
+
+    The FK column with its table, schema and database; the key column it
+    references and that attribute's term; then the evidence the edge was
+    stored with. `method`, `containment`, `vector_distance` and `rationale`
+    are null for an edge stored without evidence.
+    """
+
+    column_id: str
+    column_name: str
+    table_id: str
+    table_name: str
+    schema_name: str | None = None
+    database_id: str
+    database_name: str
+    attribute_id: str
+    attribute_name: str | None = None
+    term_name: str | None = None
+    target_table_id: str
+    target_table_name: str
+    target_schema_name: str | None = None
+    target_column_id: str | None = None
+    target_column_name: str | None = None
+    use_in_join_paths: bool = True
+    method: str | None = None
+    containment: float | None = None
+    vector_distance: float | None = None
+    rationale: str | None = None
+
+
 class ColumnExplorationForeignKeyColumn(ApiModel):
     """The Column a Column's own outgoing FOREIGN_KEY edge points at, if any.
 

@@ -95,6 +95,7 @@
     "fetch_data_exploration_graph": "(zone_ids: 'list[str] | None' = None, limit: 'int' = 500, database_id: 'str | None' = None) -> 'dict[str, list[dict[str, Any]]]'",
     "fetch_exploration_related_nodes": "(node_id: 'str', layer: 'str', zone_ids: 'list[str] | None' = None, *, skip: 'int' = 0, limit: 'int | None' = None) -> 'dict[str, Any]'",
     "fetch_semantic_exploration_graph": "(zone_ids: 'list[str] | None' = None, limit: 'int' = 500, database_id: 'str | None' = None) -> 'dict[str, list[dict[str, Any]]]'",
+    "fetch_semantic_fk_evidence": "(zone_ids: 'list[str] | None' = None, database_id: 'str | None' = None) -> 'list[dict[str, Any]]'",
     "fetch_semantic_link_path": "(source_term_id: 'str', target_term_id: 'str', zone_ids: 'list[str] | None' = None) -> 'dict[str, Any]'",
     "fetch_sql_attribute_exploration_details": "(attr_id: 'str', zone_ids: 'list[str] | None' = None) -> 'dict[str, Any]'",
     "fetch_sql_exploration_details": "(sql_id: 'str', zone_ids: 'list[str] | None' = None) -> 'dict[str, Any]'",

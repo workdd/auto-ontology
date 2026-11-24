@@ -17,6 +17,7 @@ import type {
 	ExplorationTermNode,
 	ExplorationZonesMap,
 	SemanticExplorationGraph,
+	SemanticFkEvidenceRowDto,
 	SqlAttributeExplorationDetails,
 	SqlExplorationDetails,
 	TableExplorationDetails,
@@ -35,6 +36,13 @@ const EXPLORATION_GRAPH_NODE_LIMIT = 500;
 
 export const explorationApi = {
 	getEdges: () => requests.get<ResponseWithCount<DataGraphEdgeDto[]>>('exploration/edges'),
+
+	/** Every semantic foreign key with how compilation resolved it. */
+	getSemanticFks: (databaseId?: string) =>
+		requests.get<ResponseWithCount<SemanticFkEvidenceRowDto[]>>(
+			'exploration/semantic-fks',
+			databaseId ? { database_id: databaseId } : {},
+		),
 
 	/** Data-layer Exploration graph ({nodes, links}) in a single request. */
 	getDataExplorationGraph: (databaseId?: string) =>

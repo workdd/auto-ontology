@@ -242,6 +242,34 @@ export type TermExplorationDetails = {
 /** How compilation resolved a `SEMANTIC_FK` edge. */
 export type SemanticFkMethod = 'declared' | 'llm_pick' | 'value_confirmed' | 'value_match';
 
+/**
+ * One `SEMANTIC_FK` edge from `GET /exploration/semantic-fks`: the FK column,
+ * the key column it references and that attribute's term, then the evidence
+ * the edge was stored with (all `null` when it was stored without any).
+ */
+export type SemanticFkEvidenceRowDto = {
+	column_id: string;
+	column_name: string;
+	table_id: string;
+	table_name: string;
+	schema_name: string | null;
+	database_id: string;
+	database_name: string;
+	attribute_id: string;
+	attribute_name: string | null;
+	term_name: string | null;
+	target_table_id: string;
+	target_table_name: string;
+	target_schema_name: string | null;
+	target_column_id: string | null;
+	target_column_name: string | null;
+	use_in_join_paths: boolean;
+	method: SemanticFkMethod | null;
+	containment: number | null;
+	vector_distance: number | null;
+	rationale: string | null;
+};
+
 /** The evidence a `SEMANTIC_FK` edge was stored with, for display. */
 export type SemanticFkEvidence = {
 	method: SemanticFkMethod;
