@@ -1110,6 +1110,15 @@ export const ExplorationView = () => {
 					columnId: rawColumnId,
 					columnName: columnEntity.name,
 					relationshipType: attribute.relationship_type ?? undefined,
+					semanticFkEvidence:
+						attribute.method != null
+							? {
+									method: attribute.method,
+									containment: attribute.containment ?? null,
+									vectorDistance: attribute.vector_distance ?? null,
+									rationale: attribute.rationale ?? null,
+								}
+							: undefined,
 				});
 			}
 

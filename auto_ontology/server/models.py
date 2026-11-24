@@ -872,12 +872,20 @@ class ColumnExplorationAttribute(ApiModel):
     `TermExplorationTable`/`ExplorationLink` — so a client can label the
     edge the same way it would read in the graph itself, distinguishing a
     plain attribute from an FK-shaped one (like `user_id`).
+
+    For a ``SEMANTIC_FK`` link, `method`, `containment`, `vector_distance` and
+    `rationale` carry how compilation resolved it; all are null for a
+    ``HAS_ATTRIBUTE`` link or an edge stored without evidence.
     """
 
     id: str
     name: str | None = None
     description: str | None = None
     relationship_type: str | None = None
+    method: str | None = None
+    containment: float | None = None
+    vector_distance: float | None = None
+    rationale: str | None = None
 
 
 class ColumnExplorationForeignKeyColumn(ApiModel):

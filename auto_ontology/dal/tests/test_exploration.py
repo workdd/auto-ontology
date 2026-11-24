@@ -597,3 +597,65 @@ def test_the_zones_map_is_the_one_from_pg_zones() -> None:
     from auto_ontology.dal import zones
 
     assert e.fetch_table_zones_map is zones.fetch_table_zones_map
+
+
+def _attribute_on(world, table: str, column: str = "id") -> str:
+    return _add(
+        s.column_attribute,
+        name=f"{world.prefix}-{table}-{column}",
+        source_column=column,
+        term_name=f"{world.prefix}-{table}",
+        table_id=world.tables[table],
+        source=SEMANTIC_SOURCE,
+    )
+
+
+def test_column_details_carry_the_semantic_fk_evidence(world) -> None:
+    world.table("customers", columns=("id",))
+    world.table("orders", columns=("id", "customer_ref"))
+    attribute = _attribute_on(world, "customers")
+    _link(
+        s.column__semantic_fk,
+        column_id=world.columns["orders.customer_ref"],
+        attribute_id=attribute,
+        method="value_confirmed",
+        containment=0.99,
+        vector_distance=0.43,
+        rationale="customer_ref names the customer key",
+    )
+
+    details = e.fetch_column_exploration_details(world.columns["orders.customer_ref"])
+
+    linked = details["column_attribute"]
+    assert linked["relationship_type"] == "SEMANTIC_FK"
+    assert (
+        linked["method"],
+        linked["containment"],
+        linked["vector_distance"],
+        linked["rationale"],
+    ) == ("value_confirmed", 0.99, 0.43, "customer_ref names the customer key")
+    store().query_write(
+        s.column_attribute.delete().where(s.column_attribute.c.id == attribute)
+    )
+
+
+def test_column_details_leave_evidence_empty_for_a_plain_attribute(world) -> None:
+    world.table("customers", columns=("id",))
+    attribute = _attribute_on(world, "customers")
+    _link(
+        s.column__has_attribute,
+        column_id=world.columns["customers.id"],
+        attribute_id=attribute,
+    )
+
+    linked = e.fetch_column_exploration_details(world.columns["customers.id"])[
+        "column_attribute"
+    ]
+
+    assert linked["relationship_type"] == "HAS_ATTRIBUTE"
+    assert [
+        linked[k] for k in ("method", "containment", "vector_distance", "rationale")
+    ] == [None] * 4
+    store().query_write(
+        s.column_attribute.delete().where(s.column_attribute.c.id == attribute)
+    )

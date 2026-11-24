@@ -533,8 +533,19 @@
       },
       "ColumnExplorationAttribute": {
         "additionalProperties": true,
-        "description": "The ColumnAttribute HAS_ATTRIBUTE/SEMANTIC_FK-linked to a Column, if any.\n\n`relationship_type` names the relationship kind\n(``HAS_ATTRIBUTE`` or ``SEMANTIC_FK``) actually connecting the Column\nto this ColumnAttribute \u2014 same rationale as `relationship_types` on\n`TermExplorationTable`/`ExplorationLink` \u2014 so a client can label the\nedge the same way it would read in the graph itself, distinguishing a\nplain attribute from an FK-shaped one (like `user_id`).",
+        "description": "The ColumnAttribute HAS_ATTRIBUTE/SEMANTIC_FK-linked to a Column, if any.\n\n`relationship_type` names the relationship kind\n(``HAS_ATTRIBUTE`` or ``SEMANTIC_FK``) actually connecting the Column\nto this ColumnAttribute \u2014 same rationale as `relationship_types` on\n`TermExplorationTable`/`ExplorationLink` \u2014 so a client can label the\nedge the same way it would read in the graph itself, distinguishing a\nplain attribute from an FK-shaped one (like `user_id`).\n\nFor a ``SEMANTIC_FK`` link, `method`, `containment`, `vector_distance` and\n`rationale` carry how compilation resolved it; all are null for a\n``HAS_ATTRIBUTE`` link or an edge stored without evidence.",
         "properties": {
+          "containment": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Containment"
+          },
           "description": {
             "anyOf": [
               {
@@ -550,6 +561,17 @@
             "title": "Id",
             "type": "string"
           },
+          "method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Method"
+          },
           "name": {
             "anyOf": [
               {
@@ -561,6 +583,17 @@
             ],
             "title": "Name"
           },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale"
+          },
           "relationship_type": {
             "anyOf": [
               {
@@ -571,6 +604,17 @@
               }
             ],
             "title": "Relationship Type"
+          },
+          "vector_distance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vector Distance"
           }
         },
         "required": [

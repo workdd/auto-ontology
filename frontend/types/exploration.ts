@@ -239,6 +239,17 @@ export type TermExplorationDetails = {
  * `SqlExplorationDetails.columns` — empty when no stored query ever
  * referenced it directly.
  */
+/** How compilation resolved a `SEMANTIC_FK` edge. */
+export type SemanticFkMethod = 'declared' | 'llm_pick' | 'value_confirmed' | 'value_match';
+
+/** The evidence a `SEMANTIC_FK` edge was stored with, for display. */
+export type SemanticFkEvidence = {
+	method: SemanticFkMethod;
+	containment: number | null;
+	vectorDistance: number | null;
+	rationale: string | null;
+};
+
 export type ColumnExplorationDetails = {
 	column_attribute: {
 		id: string;
@@ -246,6 +257,17 @@ export type ColumnExplorationDetails = {
 		description: string | null;
 		/** The relationship kind — `HAS_ATTRIBUTE` or `SEMANTIC_FK`. */
 		relationship_type: string | null;
+		/**
+		 * How compilation resolved a `SEMANTIC_FK` link — `declared`,
+		 * `llm_pick`, `value_confirmed` or `value_match`. `null` for a
+		 * `HAS_ATTRIBUTE` link or an edge stored without evidence; the three
+		 * fields below are `null` whenever the method measured nothing of
+		 * that kind.
+		 */
+		method?: SemanticFkMethod | null;
+		containment?: number | null;
+		vector_distance?: number | null;
+		rationale?: string | null;
 	} | null;
 	foreign_key_column: {
 		id: string;
@@ -472,6 +494,12 @@ export type ExpansionEntity = {
 	 * `expandTermNode` — only ever carries the attribute's name/description).
 	 */
 	relationshipType?: string;
+	/**
+	 * How a `columnAttribute` entity's `SEMANTIC_FK` link was resolved — from
+	 * `expandColumnNode`'s `column_attribute`. `undefined` for every other
+	 * kind, for a `HAS_ATTRIBUTE` link, and for an edge stored without it.
+	 */
+	semanticFkEvidence?: SemanticFkEvidence;
 	/**
 	 * The raw SQL text behind a `sql` entity (its own `Sql` node's
 	 * `sql_full_query`) — see `expandSqlAttributeNode`. `undefined` for

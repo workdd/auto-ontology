@@ -17,7 +17,39 @@ import type {
 	ExpansionEntity,
 	ExpansionEntityKind,
 	ExplorationLinkPathHopDto,
+	SemanticFkEvidence,
+	SemanticFkMethod,
 } from '@/types/exploration';
+
+const SEMANTIC_FK_METHOD_LABEL: Record<SemanticFkMethod, string> = {
+	declared: 'Declared foreign key',
+	llm_pick: 'Picked by the LLM, not checked against values',
+	value_confirmed: 'Confirmed by values',
+	value_match: 'Found by values, picked by the LLM',
+};
+
+/** How a `SEMANTIC_FK` link was resolved, one row per measured piece. */
+const SemanticFkEvidenceRows = ({ evidence }: { evidence: SemanticFkEvidence }) => (
+	<>
+		<PropertyRow label="Resolved by" value={SEMANTIC_FK_METHOD_LABEL[evidence.method]} />
+		{evidence.containment != null && (
+			<PropertyRow
+				label="Value containment"
+				value={`${Math.round(evidence.containment * 100)}% of the foreign key's values are in the key`}
+			/>
+		)}
+		{evidence.vectorDistance != null && (
+			<PropertyRow
+				label="Vector distance"
+				value={evidence.vectorDistance.toFixed(3)}
+				monospace
+			/>
+		)}
+		{evidence.rationale != null && (
+			<PropertyRow label="LLM rationale" value={evidence.rationale} />
+		)}
+	</>
+);
 
 const TYPE_ICON: Record<ExpansionEntityKind, IconName> = {
 	schema: IconName.Schema,
@@ -247,6 +279,9 @@ export const ActiveExpansionCard = ({ node, onClose, onView }: ActiveExpansionCa
 				)}
 				{node.kind === 'columnAttribute' && node.relationshipType != null && (
 					<PropertyRow label="Relationship" value={node.relationshipType} monospace />
+				)}
+				{node.kind === 'columnAttribute' && node.semanticFkEvidence != null && (
+					<SemanticFkEvidenceRows evidence={node.semanticFkEvidence} />
 				)}
 				{node.kind === 'sql' ? (
 					<SqlBlock sql={node.sqlText ?? ''} />

@@ -685,12 +685,34 @@ def fetch_column_exploration_details(
         .order_by(s.sql_query.c.id)
     )
 
+    attribute = dict(attr_rows[0]) if attr_rows else None
+    if attribute is not None:
+        attribute.update(_semantic_fk_evidence(column_id, attribute))
+
     return {
-        "column_attribute": dict(attr_rows[0]) if attr_rows else None,
+        "column_attribute": attribute,
         "foreign_key_column": dict(fk_rows[0]) if fk_rows else None,
         "referencing_columns": [dict(row) for row in referencing_rows if row["id"]],
         "sql_queries": [dict(row) for row in sql_rows if row["id"] and row["sql"]],
     }
+
+
+def _semantic_fk_evidence(column_id: str, attribute: dict[str, Any]) -> dict[str, Any]:
+    """How compilation resolved the column's SEMANTIC_FK edge, or all ``None``.
+
+    Read straight from the edge rather than through :func:`_attribute_link`,
+    whose union also carries HAS_ATTRIBUTE rows that have no evidence.
+    """
+    empty = dict.fromkeys(("method", "containment", "vector_distance", "rationale"))
+    if attribute.get("relationship_type") != REL_SEMANTIC_FK:
+        return empty
+    fk = s.column__semantic_fk
+    rows = store().query_read(
+        select(fk.c.method, fk.c.containment, fk.c.vector_distance, fk.c.rationale)
+        .where(fk.c.column_id == column_id, fk.c.attribute_id == attribute["id"])
+        .limit(1)
+    )
+    return dict(rows[0]) if rows else empty
 
 
 def fetch_column_attribute_exploration_details(
